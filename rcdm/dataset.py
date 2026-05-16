@@ -34,35 +34,50 @@ class RepresentationDataset(Dataset):
         """
         Args:
             reps_file  : path to the .pt file from precompute_reps.py
+                         Supports two formats:
+                           - Standard:  {"paths": [...], "reps": Tensor(N,384)}
+                             Images are loaded from disk at each __getitem__ call.
+                           - Packed:    {"images": Tensor(N,3,H,W) uint8,
+                                         "reps":   Tensor(N,384)}
+                             Images are stored directly in the file — no disk access
+                             needed at training time. Use pack_dataset.py to create.
             image_size : spatial size to resize images to (224 for Messidor-2)
         """
         print(f"Loading representations from {reps_file}...")
-        data = torch.load(reps_file)
+        data = torch.load(reps_file, weights_only=False)
 
-        self.paths = data["paths"]   # list[str], length N
-        self.reps  = data["reps"]    # Tensor (N, 384) — DinoV3 ViT-S/16 CLS tokens
+        self.reps   = data["reps"]           # Tensor (N, 384)
+        self.images = data.get("images")     # Tensor (N, 3, H, W) uint8, or None
+        self.paths  = data.get("paths", [])  # list[str], or empty if packed
 
-        print(f"  {len(self.paths)} image-representation pairs loaded")
+        if self.images is not None:
+            print(f"  {len(self.images)} packed image-representation pairs loaded "
+                  f"(no disk access at training time)")
+        else:
+            print(f"  {len(self.paths)} image-representation pairs loaded "
+                  f"(images loaded from disk)")
 
-        # Diffusion model expects images in [-1, 1]
-        # This is standard for all ADM/DDPM training
+        self.image_size = image_size
+
+        # Transform for disk-loaded images (PIL → Tensor → [-1, 1])
         self.transform = transforms.Compose([
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
-            transforms.ToTensor(),                         # [0, 1]
-            transforms.Normalize([0.5, 0.5, 0.5],
-                                  [0.5, 0.5, 0.5]),        # → [-1, 1]
+            transforms.ToTensor(),
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         ])
 
     def __len__(self):
-        return len(self.paths)
+        return len(self.images) if self.images is not None else len(self.paths)
 
     def __getitem__(self, idx):
-        # Load image and apply diffusion normalisation
-        img = Image.open(self.paths[idx]).convert("RGB")
-        x = self.transform(img)        # (3, image_size, image_size)
+        if self.images is not None:
+            # Packed format: convert uint8 (0-255) → float32 → [-1, 1]
+            x = self.images[idx].float() / 127.5 - 1.0   # (3, H, W) in [-1, 1]
+        else:
+            # Standard format: load from disk
+            img = Image.open(self.paths[idx]).convert("RGB")
+            x = self.transform(img)                        # (3, H, W) in [-1, 1]
 
-        # Load precomputed representation — already a tensor
-        h = self.reps[idx]             # (384,) DinoV3 CLS token
-
+        h = self.reps[idx]   # (384,) DinoV3 CLS token
         return x, h
