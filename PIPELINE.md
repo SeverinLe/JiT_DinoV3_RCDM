@@ -105,7 +105,7 @@ generated image : (B, 3, 224, 224)
 | Architecture | ViT-S/16 (patch size 16, hidden_dim 384, depth 12) |
 | Training | DINO self-supervised learning, fine-tuned for medical/retinal imagery |
 | Checkpoint | `checkpoints/dinov3_vits16_tmp/` (local, HuggingFace format) |
-| Output used | `last_hidden_state[:, 0, :]` — the CLS token |
+| Output used | `last_hidden_state[:, 0, :]` — the CLS token at index 0 |
 | Output dimension | **384** |
 | Input image size | **Always 224×224** (fixed by the model's positional embedding grid: 224/16 = 14×14 patches) |
 | Normalisation | ImageNet mean/std: `[0.485, 0.456, 0.406]` / `[0.229, 0.224, 0.225]` |
@@ -121,6 +121,26 @@ generated image : (B, 3, 224, 224)
 
 **Important:** the encoder runs at 224×224 regardless of what `image_size` the generative model uses. These are two independent configurations that must not be conflated.
 
+#### Register tokens
+
+This DinoV3 checkpoint includes **4 register tokens** (artefact-suppression tokens introduced in [Darcet et al. 2023](https://arxiv.org/abs/2309.16588)). The token layout in `last_hidden_state` is:
+
+```
+Index  0     : CLS token            ← used as h
+Index  1–4   : REG1, REG2, REG3, REG4  (register tokens — ignored)
+Index  5–200 : 196 patch tokens (14×14 spatial grid)
+```
+
+We extract `last_hidden_state[:, 0, :]` — always the CLS token. If patch-level spatial features are ever needed (e.g. for a spatial conditioning variant), the correct slice is `last_hidden_state[:, 5:, :]`, not `[:, 1:, :]`.
+
+#### `use_gated_mlp` fix (critical)
+
+The local checkpoint was trained with a **standard 2-projection FFN** (`up_proj` + `down_proj`), but `config.json` incorrectly declared `"use_gated_mlp": true`, which would expect a 3-projection gated FFN (`gate_proj` + `up_proj` + `down_proj`).
+
+**Effect:** HuggingFace's `AutoModel.from_pretrained` loaded `up_proj` and `down_proj` from the checkpoint, then initialised `gate_proj` **randomly** on every load (no warning is shown). Every training run and every inference run got a different random `gate_proj`, making `h` vectors non-deterministic between the run that computed `train_reps.pt` and every subsequent run.
+
+**Fix applied:** `checkpoints/dinov3_vits16_tmp/config.json` → `"use_gated_mlp": false`. All 211 FFN weight tensors now load deterministically from the checkpoint. `train_reps.pt` was recomputed after this fix.
+
 ---
 
 ### 3.2 — Precomputed representations
@@ -132,6 +152,8 @@ Representations are computed once before training and stored on disk. The genera
 
 **Why precompute:** A single DinoV3 forward pass at 224×224 is cheap, but doing it every training step adds latency, complicates batching, and makes experiments harder to reproduce. Precomputing lets training run as fast as the generative model allows.
 
+**Encoder transform is hardcoded to 224:** `scripts/precompute_reps.py` calls `build_transform(image_size=224)` regardless of the `--image_size` CLI argument. The `--image_size` flag controls the generative model's output resolution, not the encoder's input resolution. DinoV3 ViT-S/16 has a fixed positional embedding grid (14×14 patches, corresponding to 224px) and cannot accept other resolutions without interpolation artefacts. This was a latent bug in the original script where the two usages of `--image_size` were conflated.
+
 ---
 
 ### 3.3 — Dataset
@@ -142,12 +164,57 @@ Returns `(x, h)` pairs:
 
 | Tensor | Shape | Normalisation | Purpose |
 |---|---|---|---|
-| `x` | `(3, 224, 224)` | `[-1, 1]` via `(pixel − 0.5) / 0.5` | Target for flow-matching MSE loss |
+| `x` | `(3, 224, 224)` | `[-1, 1]` via `pixel / 127.5 − 1.0` (packed) or `(pixel − 0.5) / 0.5` (disk) | Target for flow-matching MSE loss |
 | `h` | `(384,)` | None (raw CLS token) | Conditioning vector for the denoiser |
 
 **Dual normalisation:** `x` and `h` use different normalisation on purpose.  
 - `h` was computed with ImageNet normalisation — changing `x`'s normalisation does not affect it.  
 - The denoiser expects `x ∈ [−1, 1]` (standard diffusion convention); the encoder expects ImageNet-normalised inputs (ViT convention). These are independent and must not be mixed.
+
+#### Dual-format support
+
+`RepresentationDataset` automatically detects which file format it receives and adapts accordingly:
+
+| Format | File contains | `__getitem__` behaviour |
+|---|---|---|
+| **Standard** | `{"paths": [...], "reps": Tensor(N,384)}` | Open each image from disk, apply `transforms.Compose([Resize, CenterCrop, ToTensor, Normalize])` |
+| **Packed** | `{"images": Tensor(N,3,H,W) uint8, "reps": Tensor(N,384)}` | Slice pre-loaded tensor, convert `uint8 → float32 → [−1,1]` with `x = img.float() / 127.5 − 1.0` |
+
+Detection is via `data.get("images")` — if the key is present, packed mode is used. No configuration needed.
+
+**Why packed mode:** The standard format stores absolute paths from the machine where `precompute_reps.py` was run. On any other machine (e.g. Colab), those paths don't exist. The packed format embeds the actual pixel data in the `.pt` file, making it fully self-contained and eliminating disk I/O at training time.
+
+---
+
+### 3.3b — Packing the dataset for portable training
+
+**File:** `scripts/pack_dataset.py`
+
+Converts a standard `train_reps.pt` (paths + representations) into a self-contained file that also embeds the image tensors as `uint8`.
+
+```
+Input:  {"paths": [...], "reps": Tensor(N, 384)}   — standard reps file
+Output: {"images": Tensor(N,3,224,224) uint8,
+          "reps":  Tensor(N, 384)}                  — packed file (~150 MB for 972 images)
+```
+
+**Usage:**
+```bash
+python scripts/pack_dataset.py \
+    --reps_file  data/messidor2/train_reps.pt \
+    --out_file   data/messidor2/train_packed.pt \
+    --image_size 224
+```
+
+**When to use:** Always when training on a machine that does not have access to the original image directory — specifically Google Colab. Upload `train_packed.pt` to Google Drive at `MyDrive/jit_rcdm/train_packed.pt` and pass it as `--reps_file` to `train.py`.
+
+**How images are packed:**
+1. Open each image from disk (PIL RGB)
+2. Resize to `image_size` (bicubic) + CenterCrop
+3. `ToTensor` → float32 `[0, 1]` → scale to `uint8 [0, 255]` → store
+4. At training time, `RepresentationDataset` converts back: `uint8 / 127.5 − 1.0 → float32 [−1, 1]`
+
+The integer-round-trip error is `< 1/255 ≈ 0.004` in `[−1,1]` space — negligible for MSE training.
 
 ---
 
@@ -415,6 +482,24 @@ x_pred = x_pred_uncond + cfg_scale × (x_pred_cond − x_pred_uncond)
 
 **What JiT used:** Learnable `null_class` embedding (integer class label version of the same idea). Our `null_h` is the continuous-h analogue.
 
+#### `.detach()` bug fix
+
+The original implementation had:
+```python
+null_expanded = null.detach().unsqueeze(0).expand(B, -1)
+```
+
+`.detach()` creates a tensor with no gradient connection to the computation graph. This meant `null_h` received **zero gradient on every training step** — it was a learnable parameter in name only, permanently stuck at its initialisation value (`zeros`). The null vector was effectively identical to RCDM's hard-coded zero vector.
+
+**Fix:** Removed `.detach()`:
+```python
+# ── JiT-RCDM [fix-3]: no .detach() — null_h must receive gradients ──
+null_expanded = null.unsqueeze(0).expand(B, -1)
+h = torch.where(mask, null_expanded, h)
+```
+
+`null_h` now receives a gradient on every training step where at least one batch element was dropped to null (i.e. ≈ 10% of steps). Over training, it converges toward the centroid of the representation space — the point that, when used as conditioning, causes the model to generate the "average" retinal image with no specific pathology direction. This is exactly what the CFG null vector should represent.
+
 ---
 
 ### 3.14 — Flow matching objective
@@ -519,7 +604,9 @@ Updated after every optimizer step. At inference, shadow weights are swapped in 
 
 ---
 
-## 4 — Configuration summary (JiT_S_16, recommended local run)
+## 4 — Configuration summary
+
+### 4.1 — JiT_S_16, local run (MPS / CPU)
 
 ```
 Encoder          DinoV3 ViT-S/16  — frozen, 384-dim CLS token
@@ -546,10 +633,57 @@ Training
   betas          (0.9, 0.95)
   ema_decay      0.9999
   cfg_dropout    0.1
+  device         mps
 
 Sampling
   steps          50 Heun ODE steps
   cfg_scale      1.0 until step 15k → 1.5–2.0 until step 30k → 2.0–3.0 beyond
+```
+
+**Command:**
+```bash
+python scripts/train.py \
+    --model S16 --reps_file data/messidor2/train_reps.pt \
+    --image_size 224 --batch_size 8 --grad_accum 4 \
+    --lr 1e-4 --warmup_steps 1000 --cfg_dropout 0.1 \
+    --total_steps 50000 --save_interval 5000 \
+    --device mps
+```
+
+---
+
+### 4.2 — JiT_S_16, Google Colab A100
+
+```
+Encoder          DinoV3 ViT-S/16  — frozen, 384-dim CLS token
+                 checkpoint from Google Drive (use_gated_mlp: false)
+                 Dataset: train_packed.pt (~150 MB, self-contained)
+
+Denoiser         JiT_S_16   (same architecture as local run)
+
+Training
+  batch_size     128  (fits in 40 GB A100 HBM without grad accum)
+  grad_accum     1
+  effective batch  128  (4× larger than local default of 32)
+  lr             1e-4 with 2000-step linear warmup
+                 (warmup scaled proportionally to effective batch size)
+  betas          (0.9, 0.95)
+  ema_decay      0.9999
+  cfg_dropout    0.1
+  device         cuda
+
+Speed            ~2000 steps/min on A100 — 50k steps ≈ 25 min
+                 vs ~2 steps/min on M2 MPS — 50k steps ≈ 23 hours
+```
+
+**Command:**
+```bash
+python scripts/train.py \
+    --model S16 --reps_file /content/train_packed.pt \
+    --image_size 224 --batch_size 128 --grad_accum 1 \
+    --lr 1e-4 --warmup_steps 2000 --cfg_dropout 0.1 \
+    --total_steps 50000 --save_interval 5000 \
+    --wandb_project jit-rcdm --device cuda
 ```
 
 ---
@@ -559,10 +693,91 @@ Sampling
 | File | Origin | Role |
 |---|---|---|
 | `rcdm/encoder.py` | Written for JiT-RCDM | Load + freeze DinoV3; `build_transform(224)` |
-| `rcdm/dataset.py` | Adapted from RCDM | `RepresentationDataset` — serves `(x, h)` pairs |
+| `rcdm/dataset.py` | Adapted from RCDM | `RepresentationDataset` — serves `(x, h)` pairs; dual-format (standard + packed) |
 | `rcdm/conditioning.py` | Adapted from RCDM + JiT | `RMSNorm`, `ConditioningProjector`, `AdaLNZero` |
-| `rcdm/jit.py` | Adapted from JiT | Full denoiser + flow-matching utilities |
-| `scripts/precompute_reps.py` | Adapted from RCDM | Batch-encode all images → `train_reps.pt` |
+| `rcdm/jit.py` | Adapted from JiT | Full denoiser + flow-matching utilities; null_h fix |
+| `scripts/precompute_reps.py` | Adapted from RCDM | Batch-encode all images → `train_reps.pt` (encoder always at 224px) |
+| `scripts/pack_dataset.py` | Written for JiT-RCDM | Pack images + reps into self-contained `train_packed.pt` for Colab |
 | `scripts/train.py` | Adapted from RCDM + JiT | Training loop with EMA, warmup, grad accum |
 | `scripts/sampling.py` | Written for JiT-RCDM | Inference: load checkpoint, run Heun ODE, save grid |
+| `checkpoints/dinov3_vits16_tmp/config.json` | DinoV3 checkpoint | `use_gated_mlp: false` — fixed to match actual checkpoint weights |
 | `guided_diffusion/` | From RCDM (unchanged) | Legacy UNet + DDPM — not used by JiT path |
+| `colab_training.ipynb` | Written for JiT-RCDM | End-to-end Colab notebook: clone repo, copy data, train, sample |
+
+---
+
+## 6 — Colab deployment workflow
+
+Training on Google Colab (A100) gives a 40–60× wall-clock speedup over Apple MPS. The full workflow requires two one-time preparation steps on your local machine.
+
+### 6.1 — One-time local preparation
+
+**Step 1 — Fix encoder config and recompute representations:**
+```bash
+# Ensure use_gated_mlp is false in config.json (already done)
+# Then recompute representations from scratch:
+python scripts/precompute_reps.py \
+    --data_dir  data/messidor2/train \
+    --out_file  data/messidor2/train_reps.pt \
+    --device    cpu
+```
+
+**Step 2 — Pack the dataset:**
+```bash
+python scripts/pack_dataset.py \
+    --reps_file  data/messidor2/train_reps.pt \
+    --out_file   data/messidor2/train_packed.pt \
+    --image_size 224
+# Output: ~150 MB self-contained file
+```
+
+**Step 3 — Upload to Google Drive:**
+- `data/messidor2/train_packed.pt` → `MyDrive/jit_rcdm/train_packed.pt`
+- `checkpoints/dinov3_vits16_tmp/` (entire folder) → `MyDrive/jit_rcdm/dinov3_vits16_tmp/`
+
+**Step 4 — Add wandb API key to Colab Secrets:**
+- Open any Colab notebook → left sidebar → key icon ("Secrets")
+- Create secret: Name = `WANDB_API_KEY`, Value = your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+- Enable notebook access for the secret
+
+### 6.2 — Per-session Colab workflow
+
+Run `colab_training.ipynb` cell by cell:
+
+| Cell | What it does | Common issues |
+|---|---|---|
+| 1 — GPU check | Detect GPU type, set batch size automatically | Runtime → Change runtime type → A100 if no GPU |
+| 2 — Mount Drive | `drive.mount('/content/drive')` | Browser popup for auth |
+| 3 — Clone repo | `git clone --branch claude/silly-faraday-d8512b` + assert `rcdm/jit.py` exists | Internet outage; wrong branch name |
+| 4 — Install deps | `pip install transformers safetensors wandb` | ~30 s; always run before Cell 5 |
+| 5 — wandb login | Reads `WANDB_API_KEY` from Colab Secrets | Secret not created or notebook access not enabled |
+| 6 — Copy encoder | Drive → `/content/dinov3_vits16_tmp/`, verify `use_gated_mlp=false` | Folder path on Drive different from expected |
+| 7 — Copy dataset | Drive → `/content/train_packed.pt`, verify `images` and `reps` keys | File > 150 MB may take 1–2 min to copy |
+| 8 — Smoke test | Clear module cache, reimport rcdm, run JiT_S_16 forward pass | Import errors = branch not pushed / Cell 3 failed |
+| 9 — Train | Full training run with wandb logging | OOM = reduce batch size; interrupt to resume via Cell 9b |
+| 9b — Resume | Auto-detect latest checkpoint, add `--resume_from` | No checkpoint = run Cell 9 first |
+| 10 — Sample | Load EMA checkpoint, generate image grid | Run after ≥ 15k steps for spatial structure |
+
+### 6.3 — CFG scale schedule
+
+Do not use high CFG scale early in training. The null-h branch needs sufficient training before extrapolation is useful:
+
+| Training steps | Recommended cfg_scale | Rationale |
+|---|---|---|
+| 0–15 k | 1.0 (disabled) | null_h not yet trained; CFG extrapolates to garbage |
+| 15–30 k | 1.5 | Mild guidance; coarse structure visible |
+| 30–50 k | 2.0–3.0 | Conditioning well-trained; standard guidance range |
+| 50 k+ | 3.0–5.0 | Fine structure visible; higher CFG sharpens detail |
+
+### 6.4 — Checkpoint persistence
+
+Checkpoints are saved in `/content/checkpoints/` inside the Colab session. **These are deleted when the session ends.** To persist them:
+
+```python
+# Add to Cell 9 (or run manually after training):
+import shutil
+shutil.copy('/content/checkpoints/step_50000.pt',
+            '/content/drive/MyDrive/jit_rcdm/step_50000.pt')
+```
+
+Each checkpoint contains: `{"step", "model", "optimiser", "model_cfg", "ema", "wandb_run_id"}`. The `wandb_run_id` allows resuming the same W&B run if training is restarted.

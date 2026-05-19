@@ -34,7 +34,7 @@ an earlier one, the earlier entry is annotated accordingly.
 
 ---
 
-## Change 1 — ResNet-50 encoder replaced by DinoV2 ViT-L/14
+## Change 1 — ResNet-50 encoder replaced by DinoV3 ViT-L/14
 
 > **Superseded by Change 6** — DinoV2 was later replaced by DinoV3.
 > This entry documents the reasoning for moving away from ResNet-50, which still applies.

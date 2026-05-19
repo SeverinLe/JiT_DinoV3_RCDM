@@ -1,35 +1,82 @@
+"""
+rcdm/conditioning.py
+
+Conditioning utilities shared by the JiT denoiser.
+
+Origin / changes vs upstream repos
+------------------------------------
+  RMSNorm              : NEW — not in RCDM or JiT as a standalone module.
+                         JiT used nn.LayerNorm inside AdaLNZero; we factor it
+                         out and replace every LayerNorm with RMSNorm.
+
+  ConditionalBatchNorm2d : FROM RCDM (unchanged).
+                           RCDM used this to condition the UNet backbone
+                           (2-D spatial feature maps, one scale/bias per channel).
+                           Kept for backward compatibility; not used by JiT path.
+
+  ConditioningProjector  : FROM RCDM (adapted).
+                           Original: Linear(2048 → 512) + SiLU — fixed dims for
+                           ResNet-50 avgpool (2048-dim) output.
+                           Changed: h_dim 2048 → 384 (DinoV3 ViT-S/16 CLS token);
+                           output dim is now configurable via cond_dim (default 768).
+
+  AdaLNZero              : NEW — from JiT / DiT (Peebles & Xie 2022).
+                           RCDM conditioned a CNN via ConditionalBatchNorm2d.
+                           JiT conditions a token sequence (B, N, D) via adaLN-Zero.
+                           RCDM's cBN cannot be used here — it assumes spatial 2-D
+                           feature maps (B, C, H, W), not token sequences.
+                           Norm: nn.LayerNorm (JiT original) → RMSNorm (our change).
+"""
+
 import torch
 import torch.nn as nn
 
 
-# ── JiT-RCDM [fix-5a]: RMSNorm defined here; imported by jit.py ──
+# ── JiT-RCDM [fix-5a]: RMSNorm — replaces nn.LayerNorm in AdaLNZero and FinalLayer ──
+# Why: RMSNorm drops the mean-centering step → faster, more stable in mixed precision.
+# Standard in all modern ViT diffusion models (MAR, SiT, etc.) that follow JiT.
 class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization (Zhang & Sennrich 2019). Used by JiT instead of LayerNorm."""
+    """
+    Root Mean Square Layer Normalization (Zhang & Sennrich 2019).
+
+    x_out = x / sqrt(mean(x²) + eps) * weight
+
+    Differs from nn.LayerNorm in that mean-centering is omitted.
+    affine=True  : learnable scale weight (used in qk-norm inside Attention)
+    affine=False : no learnable parameters (used inside AdaLNZero where adaLN
+                   already provides shift and scale)
+    """
 
     def __init__(self, dim: int, eps: float = 1e-6, affine: bool = True):
         super().__init__()
-        self.eps = eps
+        self.eps    = eps
         self.weight = nn.Parameter(torch.ones(dim)) if affine else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        norm = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        norm  = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
         x_out = x.float() * norm
         if self.weight is not None:
             x_out = x_out * self.weight
         return x_out.to(x.dtype)
 
 
+# ── FROM RCDM — unchanged ──
+# Used only by the legacy UNet path (guided_diffusion/). Not used by JiT.
 class ConditionalBatchNorm2d(nn.Module):
     """
-    Conditional Batch Normalization — used by the legacy UNet denoiser.
+    Conditional Batch Normalization from RCDM.
 
-    Kept for backward compatibility with the UNet path. The JiT denoiser
-    uses AdaLNZero instead (see below).
+    Conditions a 2-D CNN feature map (B, C, H, W) using a conditioning vector h.
+    One learned scale γ and bias β per channel, derived from h via a linear layer.
+
+    Kept for backward compatibility with the UNet path in guided_diffusion/.
+    The JiT denoiser uses AdaLNZero instead (see below) because it operates on
+    token sequences (B, N, D), not spatial feature maps.
     """
 
     def __init__(self, num_features: int, cond_dim: int):
         super().__init__()
-        self.bn = nn.BatchNorm2d(num_features, affine=False, eps=1e-5, momentum=0.1)
+        self.bn       = nn.BatchNorm2d(num_features, affine=False, eps=1e-5, momentum=0.1)
         self.gamma_fc = nn.Linear(cond_dim, num_features)
         self.beta_fc  = nn.Linear(cond_dim, num_features)
         nn.init.ones_(self.gamma_fc.weight)
@@ -39,32 +86,38 @@ class ConditionalBatchNorm2d(nn.Module):
 
     def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         x_norm = self.bn(x)
-        gamma = self.gamma_fc(h).unsqueeze(-1).unsqueeze(-1)
-        beta  = self.beta_fc(h).unsqueeze(-1).unsqueeze(-1)
+        gamma  = self.gamma_fc(h).unsqueeze(-1).unsqueeze(-1)
+        beta   = self.beta_fc(h).unsqueeze(-1).unsqueeze(-1)
         return gamma * x_norm + beta
 
 
+# ── FROM RCDM (adapted) ──
+# Original: Linear(2048 → 512) + SiLU — hard-coded for ResNet-50 avgpool (2048-dim).
+# Changed:  h_dim parameter (2048 → 384 for DinoV3 ViT-S/16 CLS token);
+#           cond_dim parameter (512 → configurable, default 768 for JiT-B).
+#           JiT_S_16/S32 presets use cond_dim=128 as a regularising bottleneck.
 class ConditioningProjector(nn.Module):
     """
-    Projects the DinoV3 CLS token directly to hidden_dim.
+    Projects the encoder CLS token h into the conditioning space.
 
-    Following the JiT paper exactly: cond_dim == hidden_dim.
-    There is no compression bottleneck — h is projected to the same
-    dimension as the ViT hidden state so it can be added to the timestep
-    embedding without any shape mismatch.
+        h (B, h_dim=384) → Linear(384 → cond_dim) + SiLU → h_proj (B, cond_dim)
 
-    Why keep a projector at all: the CLS token carries global image semantics
-    at a fixed scale. A learned linear + SiLU layer lets the model warp that
+    h_proj is then added to the timestep embedding to form the shared
+    conditioning signal c that drives all adaLN-Zero blocks.
+
+    The learned linear layer lets the model warp the frozen encoder's
     semantic space to align with the diffusion model's internal representation
-    without touching the frozen encoder.
+    without modifying the encoder weights.
 
     Args:
-        h_dim    : dimension of raw DinoV3 CLS token (384 for ViT-S/16)
-        cond_dim : target dimension = hidden_dim of the JiT ViT
+        h_dim    : encoder CLS token dimension (384 for DinoV3 ViT-S/16)
+        cond_dim : width of the shared conditioning signal c
+                   (== hidden_dim → no bottleneck; < hidden_dim → bottleneck)
     """
 
     def __init__(self, h_dim: int = 384, cond_dim: int = 768):
         super().__init__()
+        # ── changed from RCDM: h_dim 2048→384, cond_dim 512→configurable ──
         self.proj = nn.Sequential(
             nn.Linear(h_dim, cond_dim),
             nn.SiLU(),
@@ -75,48 +128,45 @@ class ConditioningProjector(nn.Module):
         return self.proj(h)
 
 
+# ── NEW — from JiT / DiT (Peebles & Xie 2022) ──
+# RCDM had no equivalent: RCDM conditioned a UNet via ConditionalBatchNorm2d
+# which operates on 2-D spatial feature maps (B, C, H, W). AdaLNZero works on
+# 1-D token sequences (B, N, D) — mandatory for a ViT backbone.
+# Norm change vs JiT original: nn.LayerNorm → RMSNorm (fix-5a).
 class AdaLNZero(nn.Module):
     """
-    Adaptive Layer Norm Zero (adaLN-Zero) from DiT (Peebles & Xie 2022),
-    adopted directly by JiT.
+    Adaptive Layer Norm Zero (adaLN-Zero) conditioning for transformer blocks.
 
-    Replaces Conditional Batch Norm in the JiT denoiser. Unlike cBN which
-    conditions a spatial 2-D feature map, adaLN-Zero conditions a sequence
-    of 1-D token embeddings — the natural choice for a ViT backbone.
+    A per-block MLP maps the shared conditioning signal c to 6 modulation scalars:
+        c → SiLU → Linear(cond_dim → 6·hidden_dim)
+        → shift_a, scale_a, gate_a, shift_f, scale_f, gate_f
 
-    How it works:
-      A single MLP takes the fused conditioning signal
-          c = timestep_embedding(t) + cond_proj(h)
-      and produces 6 modulation scalars per token dimension:
-          [shift_attn, scale_attn, gate_attn, shift_ffn, scale_ffn, gate_ffn]
+    Applied to the token sequence x:
+        x ← x + gate_a · Attn( (1+scale_a) · RMSNorm(x) + shift_a )
+        x ← x + gate_f · FFN(  (1+scale_f) · RMSNorm(x) + shift_f )
 
-      Applied as:
-          x ← x + gate_attn · Attn((1+scale_attn)·RMSNorm(x) + shift_attn)
-          x ← x + gate_ffn  · FFN((1+scale_ffn) ·RMSNorm(x) + shift_ffn)
-
-    Zero-init rationale:
-      The output projection of adaLN_modulation is zero-initialised.
-      At the start of training all gate values are 0, so every block is an
-      identity function — identical reasoning to cBN initialising gamma=1,
-      beta=0. The network stabilises before conditioning starts having effect.
+    Zero-init: the output projection is initialised to zero so all gates start
+    at 0 → every block is an identity at training step 0. The model first
+    learns the unconditional denoising trajectory; conditioning takes effect
+    gradually as gates depart from zero. Same rationale as cBN initialising
+    γ=1, β=0 in RCDM.
 
     Args:
-        hidden_dim : ViT hidden dimension (384 for ViT-S, 768 for ViT-B, 1024 for ViT-L)
+        hidden_dim : ViT hidden dimension
         cond_dim   : dimension of the fused conditioning vector c
     """
 
     def __init__(self, hidden_dim: int, cond_dim: int):
         super().__init__()
-        # ── JiT-RCDM [fix-5a]: RMSNorm instead of LayerNorm ──
+        # ── JiT-RCDM [fix-5a]: RMSNorm replaces nn.LayerNorm ──
         self.norm1 = RMSNorm(hidden_dim, affine=False, eps=1e-6)
         self.norm2 = RMSNorm(hidden_dim, affine=False, eps=1e-6)
 
-        # MLP: SiLU first so gradients flow cleanly through zero-init output
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
             nn.Linear(cond_dim, 6 * hidden_dim),
         )
-        # CRITICAL: zero-init — gates start at 0 → identity at init
+        # Zero-init: gates = 0 at step 0 → all blocks are identity at init
         nn.init.zeros_(self.adaLN_modulation[-1].weight)
         nn.init.zeros_(self.adaLN_modulation[-1].bias)
 
@@ -125,17 +175,14 @@ class AdaLNZero(nn.Module):
 
     def forward_pre(self, x: torch.Tensor, c: torch.Tensor):
         """
-        Return the 6 modulation params from conditioning c.
-
-        Called by JiTBlock which supplies its own attention and FFN modules,
-        keeping AdaLNZero as a pure conditioning helper.
+        Return the 6 modulation parameters from conditioning signal c.
+        Called by JiTBlock which supplies its own Attention and FFN modules.
 
         Args:
-            x : token sequence  (B, N, hidden_dim)
-            c : fused condition  (B, cond_dim)
+            x : token sequence (B, N, hidden_dim)
+            c : fused conditioning (B, cond_dim)
 
         Returns:
-            (shift_a, scale_a, gate_a, shift_f, scale_f, gate_f)
-            each shape (B, hidden_dim)
+            shift_a, scale_a, gate_a, shift_f, scale_f, gate_f — each (B, hidden_dim)
         """
         return self.adaLN_modulation(c).chunk(6, dim=-1)
