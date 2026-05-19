@@ -44,6 +44,39 @@ Applied to **Messidor-2** diabetic retinopathy fundus images, conditioned on a f
         │  FinalLayer → unpatchify                 │
         │    → x_pred  (B, 3, 224, 224)            │
         └──────────────────────────────────────────┘
+---------------------------------------------------------------
+Zoom in on JiT Block: 
+
+z_t (B, 3, 224, 224)
+    │
+    ▼  PatchEmbed
+196 tokens (B, 196, 384)
+    │
+    ▼  ── JiTBlock 1 ──────────────────────────────────────────
+    │
+    │   c (B, 128)   ← h_proj + t_emb, computed once before blocks
+    │       │
+    │       ▼  adaLN MLP: Linear(128 → 6×384) + SiLU
+    │       │
+    │   shift_a, scale_a, gate_a,     ← for attention branch
+    │   shift_f, scale_f, gate_f      ← for FFN branch
+    │       │                            each is (B, 384)
+    │       │
+    │       ▼  applied to the token sequence:
+    │
+    │   x ← RMSNorm(x)
+    │   x ← (1 + scale_a) · x + shift_a   ← h and t modulate every token
+    │   x ← x + gate_a · Attention(x)
+    │
+    │   x ← RMSNorm(x)
+    │   x ← (1 + scale_f) · x + shift_f   ← h and t modulate every token again
+    │   x ← x + gate_f · SwiGLU(x)
+    │
+    ▼  ── same in blocks 2–12 ─────────────────────────────────
+    │
+    ▼  FinalLayer (one more adaLN shift+scale from c)
+    ▼  unpatchify
+x_pred (B, 3, 224, 224)
 ```
 
 **Model preset — `JiT_S_16`:**
@@ -456,14 +489,18 @@ A100 processes ~2000 steps/min — 50k steps ≈ 25 minutes.
 | `--device` | `cpu` | `cpu`, `cuda`, or `mps` |
 
 ### Training duration guide
+Our dataset: 972 images (Messidor-2 training split); ~1300× smaller than ImageNet.
+Not the number of steps but nummber of sample updates relative to dataset complexity is relevant; JiT needed ~100 M updates on 1.28 M diverse images.
+So empirically on Colab at batch 128: 50 k steps already gives 6.4 M sample updates for our dataset: 
+Roughly:
 
 | Steps | Effective samples (batch=32) | What you typically see |
 |---|---|---|
-| 5 k | 160 k | Mean color and coarse brightness — orange blobs |
-| 15 k | 480 k | Coarse structure — disc location, vessel quadrants |
-| 30 k | 960 k | Vessel topology visible; CFG scale 1.5–2.0 usable |
-| 50 k | 1.6 M | Fine vessel branches; CFG scale 2.0–3.0 usable |
-| 100 k | 3.2 M | Micro-detail; full CFG range |
+| 1.25 k | 160 k | Mean color and coarse brightness — orange blobs |
+| 3.75 k | 480 k | Coarse structure — disc location, vessel quadrants |
+| 7.5 k | 960 k | Vessel topology visible; CFG scale 1.5–2.0 usable |
+| 12.5 k | 1.6 M | Fine vessel branches; CFG scale 2.0–3.0 usable |
+| 25 k | 3.2 M | Micro-detail; full CFG range |
 
 ### Resuming
 
@@ -505,16 +542,7 @@ Output: one PNG grid per conditioning image — leftmost tile is the conditionin
 | `--num_steps` | `50` | Heun ODE steps |
 | `--device` | `cpu` | `cpu`, `cuda`, or `mps` |
 
-### CFG scale schedule
 
-| Training steps completed | Recommended `--cfg_scale` |
-|---|---|
-| < 15 k | 1.0 (no guidance — null_h not yet trained) |
-| 15–30 k | 1.5 |
-| 30–50 k | 2.0–3.0 |
-| 50 k+ | 3.0–5.0 |
-
-`cfg_scale=1.0` is equivalent to no guidance (standard conditional forward pass). Values below 1.0 reduce conditioning strength; 0.0 ignores conditioning entirely.
 
 ---
 
