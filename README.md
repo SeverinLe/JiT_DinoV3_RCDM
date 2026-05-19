@@ -205,8 +205,8 @@ During training, 10% of batch elements have their `h` replaced by `null_h` (CFG 
 x_pred = x_uncond + cfg_scale × (x_cond − x_uncond)
 ```
 
-**`null_h` is a **learnable** parameter — it converges toward the centroid of the representation space (the "average" retinal image direction) over training. RCDM used a fixed `torch.zeros_like(h)` as the null vector; zero is an arbitrary point in representation space. The learnable version is taken directly from JiT's `null_class` embedding for class-conditional generation.
-The original implementation had null.detach() which blocked all gradients to null_h — it never actually updated and was identical to RCDM's hard-coded zeros. Removing .detach() allows gradients to flow normally. null_h receives gradients on every training step where a batch element was dropped to null (~10% of steps). Over training it converges toward a point that minimises the unconditional generation loss — meaning the model learns what vector, when used as conditioning, produces the best generic fundus image with no specific patient direction.**
+`null_h` is a **learnable** parameter — it converges toward the centroid of the representation space (the "average" retinal image direction) over training. RCDM used a fixed `torch.zeros_like(h)` as the null vector; zero is an arbitrary point in representation space. The learnable version is taken directly from JiT's `null_class` embedding for class-conditional generation.
+The original implementation had null.detach() which blocked all gradients to null_h — it never actually updated and was identical to RCDM's hard-coded zeros. Removing .detach() allows gradients to flow normally. null_h receives gradients on every training step where a batch element was dropped to null (~10% of steps). Over training it converges toward a point that minimises the unconditional generation loss — meaning the model learns what vector, when used as conditioning, produces the best generic fundus image with no specific patient direction
 ---
 
 ### Dimension summary
