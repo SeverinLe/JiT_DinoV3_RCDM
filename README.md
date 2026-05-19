@@ -113,7 +113,7 @@ for each step:
 
 ## Conditioning pipeline — how `h` drives generation
 
-This section explains the full path from a conditioning fundus image to the modulation of every transformer block. Understanding the dimensions at each step is important for reproducing or extending the work.
+This section explains the full path from a conditioning fundus image to the modulation of every transformer block:
 
 ### Step 1 — Encode the conditioning image
 
@@ -127,7 +127,7 @@ h : (B, 384)
 
 **Why 384?** DinoV3 ViT-S/16 has `hidden_dim=384` — every token in the transformer, including CLS, is 384-dimensional. This is an architecture constant of ViT-S; ViT-B gives 768, ViT-L gives 1024. We use ViT-S because it is the smallest domain-fine-tuned model available, keeping the conditioning path lightweight.
 
-**Why the CLS token?** The CLS token attends to all 196 patch tokens throughout all 12 encoder layers. By the final layer it aggregates global semantic content — pathology stage, disc location, vessel density — without being tied to any particular spatial position. Patch tokens (indices 5–200, after 4 register tokens at 1–4) carry local spatial information; they could be used for spatially-conditioned generation but are not used here.
+**Why the CLS token?** The CLS token attends to all 196 patch tokens throughout all 12 encoder layers. By the final layer it aggregates global semantic content — pathology stage, disc location, vessel density — without being tied to any particular spatial position. 
 
 **Why 224×224 for the encoder?** DinoV3 ViT-S/16 has a fixed positional embedding grid of 14×14 patches (224 ÷ 16 = 14). Any other input resolution would silently interpolate or corrupt these positional embeddings. The encoder always runs at 224px regardless of what resolution the generative model produces.
 
@@ -142,16 +142,16 @@ h : (B, 384)
 h_proj : (B, 128)
 ```
 
-**Why a projection at all?** The frozen encoder's CLS token lives in a representation space optimised for image similarity — not for steering a diffusion denoiser. The learned `Linear + SiLU` lets the denoiser warp that space to align with its internal activations, without touching the frozen encoder.
+**Projection** The frozen encoder's CLS token lives in a representation space optimised for image similarity — not for steering a diffusion denoiser. The learned `Linear + SiLU` lets the denoiser warp that space to align with its internal activations, without touching the frozen encoder.
 
-**Why output dimension 128 (`cond_dim=128`)?** This is a regularising bottleneck. The full 384-dim CLS token contains redundant information for our small 972-image dataset. Compressing to 128 before adding to the timestep signal forces the model to keep only the dominant axes of variation in `h`. It also reduces the parameter count of the adaLN MLPs in every block (each goes from `cond_dim → 6×hidden_dim`; smaller `cond_dim` = smaller adaLN MLP). Setting `cond_dim=hidden_dim=384` (no bottleneck) is the paper-faithful JiT setting and can be used for larger datasets.
+**Output dimension 128 (`cond_dim=128`)?** This is a regularising bottleneck additionay introduced, original RCDM also uses a bottleneck (2048 -> 512), to reduce parameters. The full 384-dim CLS token contains (probably) redundant information for our small 972-image dataset. Compressing to 128 before adding to the timestep signal forces the model to keep only the dominant axes of variation in `h`. It also reduces the parameter count of the adaLN MLPs in every block (each goes from `cond_dim → 6×hidden_dim`; smaller `cond_dim` = smaller adaLN MLP). Setting `cond_dim=hidden_dim=384` (no bottleneck) is the paper-faithful JiT setting and can be used for larger datasets.
 
-**How this differs from RCDM:**
+**Difference from RCDM:**
 RCDM used `Linear(2048 → 512) + SiLU` — the same one-layer design. We kept the design but changed `2048 → 384` (encoder switch) and `512 → 128` (smaller bottleneck for smaller dataset).
 
 ---
 
-### Step 3 — Fuse with the timestep embedding
+### Step 3 — Fuse with timestep embedding
 
 ```
 t : (B,)   scalar in [0, 1]
@@ -163,8 +163,6 @@ c = h_proj + t_emb    (B, 128)        ← single vector, computed once per forwa
 ```
 
 `c` fuses both signals — *what* the image looks like (from `h`) and *how much noise* is present (from `t`). The model cannot separate them — they are added before the first block and stay combined throughout. This means at every layer the model jointly uses both signals when deciding how to update each patch token.
-
-**Why add instead of concatenate?** Concatenation would double `c` to 256-dim, increasing adaLN MLP parameters by 2× in all 12 blocks. Addition keeps `c` at 128-dim and naturally allows the timestep signal to dominate early in training (when `h_proj` weights are near-zero from random init), providing a natural curriculum: denoise first, steer with `h` later.
 
 ---
 
@@ -187,7 +185,7 @@ This happens 12 times (one per block) plus once in the final layer. Conditioning
 
 **Zero-init:** The `Linear(128 → 6×384)` output projection is initialised to zero. At training step 0, all gates are 0 → every block is an identity function. The model stabilises in unconditional mode first; conditioning gradually engages as the gates depart from zero.
 
-**Why not Conditional Batch Norm (RCDM's approach)?** RCDM's cBN operates on 2-D spatial feature maps `(B, C, H, W)` — one scale/bias per channel. A ViT operates on 1-D token sequences `(B, N, D)`. cBN cannot be applied here; adaLN is the standard solution for token sequences.
+**Why not Conditional Batch Norm (RCDM's approach):** RCDM's cBN operates on 2-D spatial feature maps `(B, C, H, W)` — one scale/bias per channel. A ViT operates on 1-D token sequences `(B, N, D)`. cBN cannot be applied here; adaLN is the standard solution for token sequences.
 
 ---
 
@@ -203,10 +201,8 @@ During training, 10% of batch elements have their `h` replaced by `null_h` (CFG 
 x_pred = x_uncond + cfg_scale × (x_cond − x_uncond)
 ```
 
-`null_h` is a **learnable** parameter — it converges toward the centroid of the representation space (the "average" retinal image direction) over training. RCDM used a fixed `torch.zeros_like(h)` as the null vector; zero is an arbitrary point in representation space. The learnable version is taken directly from JiT's `null_class` embedding for class-conditional generation.
-
-**Critical fix:** the original implementation had `null.detach()` which blocked all gradients to `null_h` — it never actually updated and was identical to RCDM's hard-coded zeros. Removing `.detach()` allows gradients to flow normally.
-
+**`null_h` is a **learnable** parameter — it converges toward the centroid of the representation space (the "average" retinal image direction) over training. RCDM used a fixed `torch.zeros_like(h)` as the null vector; zero is an arbitrary point in representation space. The learnable version is taken directly from JiT's `null_class` embedding for class-conditional generation.
+The original implementation had null.detach() which blocked all gradients to null_h — it never actually updated and was identical to RCDM's hard-coded zeros. Removing .detach() allows gradients to flow normally. null_h receives gradients on every training step where a batch element was dropped to null (~10% of steps). Over training it converges toward a point that minimises the unconditional generation loss — meaning the model learns what vector, when used as conditioning, produces the best generic fundus image with no specific patient direction.**
 ---
 
 ### Dimension summary
