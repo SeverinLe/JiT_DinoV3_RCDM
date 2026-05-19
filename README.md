@@ -1,4 +1,4 @@
-# JiT-RCDM — Representation-Conditioned Diffusion for Retinal Images
+# JiT-RCDM — Representation-Conditioned Generation for Retinal Images
 
 A research implementation that merges two open-source frameworks:
 
