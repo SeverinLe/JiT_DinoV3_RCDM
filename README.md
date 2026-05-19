@@ -7,6 +7,10 @@ A research implementation that merges two open-source frameworks:
 
 Applied to **Messidor-2** diabetic retinopathy fundus images, conditioned on a frozen **DinoV3 ViT-S/16** encoder (384-dim CLS token).
 
+Training the JiT-RCDM 100k steps with the default configuration: test sample on the left, 4 cond. gen images on the right
+![alt text](https://github.com/SeverinLe/master_implementation/blob/main/sample_20051020_43906_0100_PP.png#:~:text=sample_20051020_43906_0100_PP)"Example Sample:")
+
+
 ---
 
 ## Architecture overview
