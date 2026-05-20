@@ -131,9 +131,9 @@ h : (B, 384)
 
 **Why 384?** DinoV3 ViT-S/16 has `hidden_dim=384` — every token in the transformer, including CLS, is 384-dimensional. This is an architecture constant of ViT-S; ViT-B gives 768, ViT-L gives 1024. We use ViT-S because it is the smallest domain-fine-tuned model available, keeping the conditioning path lightweight.
 
-**Why the CLS token?** The CLS token attends to all 196 patch tokens throughout all 12 encoder layers. By the final layer it aggregates global semantic content — pathology stage, disc location, vessel density — without being tied to any particular spatial position. 
+**CLS token:** The CLS token attends to all 196 patch tokens throughout all 12 encoder layers. By the final layer it aggregates global semantic content — pathology stage, disc location, vessel density — without being tied to any particular spatial position. 
 
-**Why 224×224 for the encoder?** DinoV3 ViT-S/16 has a fixed positional embedding grid of 14×14 patches (224 ÷ 16 = 14). Any other input resolution would silently interpolate or corrupt these positional embeddings. The encoder always runs at 224px regardless of what resolution the generative model produces.
+**224×224 for the encoder:** DinoV3 ViT-S/16 has a fixed positional embedding grid of 14×14 patches (224 ÷ 16 = 14). Any other input resolution would silently interpolate or corrupt these positional embeddings. The encoder always runs at 224px regardless of what resolution the generative model produces.
 
 ---
 
@@ -189,7 +189,7 @@ This happens 12 times (one per block) plus once in the final layer. Conditioning
 
 **Zero-init:** The `Linear(128 → 6×384)` output projection is initialised to zero. At training step 0, all gates are 0 → every block is an identity function. The model stabilises in unconditional mode first; conditioning gradually engages as the gates depart from zero.
 
-**Why not Conditional Batch Norm (RCDM's approach):** RCDM's cBN operates on 2-D spatial feature maps `(B, C, H, W)` — one scale/bias per channel. A ViT operates on 1-D token sequences `(B, N, D)`. cBN cannot be applied here; adaLN is the standard solution for token sequences.
+**No Conditional Batch Norm (RCDM's approach):** RCDM's cBN operates on 2-D spatial feature maps `(B, C, H, W)` — one scale/bias per channel. A ViT operates on 1-D token sequences `(B, N, D)`. cBN cannot be applied here; adaLN is the standard solution for token sequences.
 
 ---
 
@@ -204,9 +204,10 @@ During training, 10% of batch elements have their `h` replaced by `null_h` (CFG 
 ```
 x_pred = x_uncond + cfg_scale × (x_cond − x_uncond)
 ```
-
-`null_h` is a **learnable** parameter — it converges toward the centroid of the representation space (the "average" retinal image direction) over training. RCDM used a fixed `torch.zeros_like(h)` as the null vector; zero is an arbitrary point in representation space. The learnable version is taken directly from JiT's `null_class` embedding for class-conditional generation.
+```
+`null_h` is a learnable parameter — it converges toward the centroid of the representation space (the "average" retinal image direction) over training. RCDM used a fixed `torch.zeros_like(h)` as the null vector; zero is an arbitrary point in representation space. The learnable version is taken directly from JiT's `null_class` embedding for class-conditional generation.
 The original implementation had null.detach() which blocked all gradients to null_h — it never actually updated and was identical to RCDM's hard-coded zeros. Removing .detach() allows gradients to flow normally. null_h receives gradients on every training step where a batch element was dropped to null (~10% of steps). Over training it converges toward a point that minimises the unconditional generation loss — meaning the model learns what vector, when used as conditioning, produces the best generic fundus image with no specific patient direction
+```
 ---
 
 ### Dimension summary
@@ -327,11 +328,8 @@ master_implementation/
 │   ├── pack_dataset.py           ← step 1b: pack images for Colab            [new]
 │   ├── train.py                  ← step 2: train JiT-RCDM                   [RCDM+JiT adapted]
 │   └── sampling.py               ← step 3: generate images                  [new]
-│
-├── guided_diffusion/             ← legacy ADM UNet + DDPM (reference only)  [RCDM unchanged]
-│
+││
 ├── colab_training.ipynb          ← Google Colab A100 training notebook       [new]
-├── PIPELINE.md                   ← full architecture + design decisions
 ├── CHANGES.md                    ← complete change log vs upstream repos
 └── README.md                     ← this file
 ```
