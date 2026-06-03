@@ -170,7 +170,7 @@ c = h_proj + t_emb    (B, 128)        ← single vector, computed once per forwa
 
 ---
 
-### Step 4 — adaLN-Zero: conditioning inside every block
+### Step 4 — adaLN-Zero (JiT): conditioning inside every block
 
 `c` is broadcast to all 12 transformer blocks. Each block has its own small adaLN MLP:
 
@@ -225,14 +225,10 @@ The original implementation had null.detach() which blocked all gradients to nul
 ---
 
 ## Source file attribution
-
-This section documents exactly which files were taken from each upstream repo, and what was changed to make the pipeline work.
-
 ### Files from RCDM (`facebookresearch/RCDM`)
 
 | File | Status | Changes made |
 |---|---|---|
-| `guided_diffusion/` | Kept unchanged | Legacy ADM UNet + DDPM — kept for reference only, not used by JiT path |
 | `rcdm/dataset.py` | Adapted | (1) `h_dim` 2048→384; (2) added dual-format detection (standard paths vs packed uint8 images); (3) normalisation `[0,1]→[−1,1]` path for packed tensors |
 | `rcdm/conditioning.py` | Adapted | (1) `ConditioningProjector` input dim 2048→384, output dim configurable via `cond_dim`; (2) added `RMSNorm`; (3) added `AdaLNZero` (replaces `ConditionalBatchNorm2d` for token sequences) |
 | `scripts/precompute_reps.py` | Adapted | (1) Encoder ResNet-50→DinoV3; (2) rep dim 2048→384; (3) `build_transform` hardcoded to 224 (encoder fixed grid — not tied to `--image_size`) |
@@ -252,17 +248,6 @@ This section documents exactly which files were taken from each upstream repo, a
 | `scripts/sampling.py` | Inference script: load EMA checkpoint, run 50-step Heun ODE, save image grids |
 | `scripts/pack_dataset.py` | Convert `train_reps.pt` (paths + reps) → `train_packed.pt` (uint8 images + reps) for self-contained Colab training |
 | `colab_training.ipynb` | End-to-end Google Colab A100 notebook: clone repo, copy data from Drive, train, sample |
-
-### Critical fixes required to make the pipeline work
-
-These are not optional improvements — without them the model produces wrong or non-deterministic results:
-
-| Fix | File | Problem | Solution |
-|---|---|---|---|
-| `use_gated_mlp: false` | `checkpoints/dinov3_vits16_tmp/config.json` | Config declared 3-proj gated FFN; checkpoint only has 2-proj FFN. `gate_proj` was randomly re-initialised on every load → `h` vectors non-deterministic between training and inference | Set `"use_gated_mlp": false` in `config.json`; recompute `train_reps.pt` |
-| Remove `null_h.detach()` | `rcdm/jit.py` — `FlowMatching.training_loss` | `.detach()` blocked all gradients to `null_h`; the learnable null parameter never updated | Removed `.detach()` — gradients flow normally |
-| EMA checkpoint persistence | `scripts/train.py` | EMA shadow weights were updated during training but never saved to disk; resuming discarded all EMA history | Added `"ema": ema.state_dict()` to both periodic and final checkpoint saves |
-| Encoder transform fixed to 224 | `scripts/precompute_reps.py` | `build_transform(args.image_size)` — if `--image_size` ≠ 224, encoder received wrong resolution (DinoV3 has fixed 14×14 positional grid) | Changed to `build_transform(image_size=224)` unconditionally |
 
 ---
 
@@ -627,9 +612,9 @@ The null_h branch needs training before CFG extrapolation is useful. Use `--cfg_
   year    = {2022}
 }
 
-@inproceedings{li2024jit,
-  title   = {Just-in-Time Diffusion: Generative Models with Deterministic Inference},
-  author  = {Li, Tiankai and others},
-  year    = {2024}
-}
+@article{li2025jit,
+  title={Back to Basics: Let Denoising Generative Models Denoise},
+  author={Li, Tianhong and He, Kaiming},
+  journal={arXiv preprint arXiv:2511.13720},
+  year={2025}
 ```
