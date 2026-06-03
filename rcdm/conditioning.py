@@ -9,11 +9,6 @@ Origin / changes vs upstream repos
                          JiT used nn.LayerNorm inside AdaLNZero; we factor it
                          out and replace every LayerNorm with RMSNorm.
 
-  ConditionalBatchNorm2d : FROM RCDM (unchanged).
-                           RCDM used this to condition the UNet backbone
-                           (2-D spatial feature maps, one scale/bias per channel).
-                           Kept for backward compatibility; not used by JiT path.
-
   ConditioningProjector  : FROM RCDM (adapted).
                            Original: Linear(2048 → 512) + SiLU — fixed dims for
                            ResNet-50 avgpool (2048-dim) output.
@@ -33,7 +28,6 @@ import torch.nn as nn
 
 
 # ── JiT-RCDM [fix-5a]: RMSNorm — replaces nn.LayerNorm in AdaLNZero and FinalLayer ──
-# Why: RMSNorm drops the mean-centering step → faster, more stable in mixed precision.
 # Standard in all modern ViT diffusion models (MAR, SiT, etc.) that follow JiT.
 class RMSNorm(nn.Module):
     """
@@ -59,36 +53,6 @@ class RMSNorm(nn.Module):
             x_out = x_out * self.weight
         return x_out.to(x.dtype)
 
-
-# ── FROM RCDM — unchanged ──
-# Used only by the legacy UNet path (guided_diffusion/). Not used by JiT.
-class ConditionalBatchNorm2d(nn.Module):
-    """
-    Conditional Batch Normalization from RCDM.
-
-    Conditions a 2-D CNN feature map (B, C, H, W) using a conditioning vector h.
-    One learned scale γ and bias β per channel, derived from h via a linear layer.
-
-    Kept for backward compatibility with the UNet path in guided_diffusion/.
-    The JiT denoiser uses AdaLNZero instead (see below) because it operates on
-    token sequences (B, N, D), not spatial feature maps.
-    """
-
-    def __init__(self, num_features: int, cond_dim: int):
-        super().__init__()
-        self.bn       = nn.BatchNorm2d(num_features, affine=False, eps=1e-5, momentum=0.1)
-        self.gamma_fc = nn.Linear(cond_dim, num_features)
-        self.beta_fc  = nn.Linear(cond_dim, num_features)
-        nn.init.ones_(self.gamma_fc.weight)
-        nn.init.zeros_(self.gamma_fc.bias)
-        nn.init.zeros_(self.beta_fc.weight)
-        nn.init.zeros_(self.beta_fc.bias)
-
-    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        x_norm = self.bn(x)
-        gamma  = self.gamma_fc(h).unsqueeze(-1).unsqueeze(-1)
-        beta   = self.beta_fc(h).unsqueeze(-1).unsqueeze(-1)
-        return gamma * x_norm + beta
 
 
 # ── FROM RCDM (adapted) ──
@@ -129,8 +93,7 @@ class ConditioningProjector(nn.Module):
 
 
 # ── NEW — from JiT / DiT (Peebles & Xie 2022) ──
-# RCDM had no equivalent: RCDM conditioned a UNet via ConditionalBatchNorm2d
-# which operates on 2-D spatial feature maps (B, C, H, W). AdaLNZero works on
+# RCDM had no equivalent: RCDM conditioned a UNet; AdaLNZero works on
 # 1-D token sequences (B, N, D) — mandatory for a ViT backbone.
 # Norm change vs JiT original: nn.LayerNorm → RMSNorm (fix-5a).
 class AdaLNZero(nn.Module):
