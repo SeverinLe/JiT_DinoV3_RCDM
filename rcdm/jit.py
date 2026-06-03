@@ -6,16 +6,16 @@ JiT (ViT-based) denoiser + flow-matching utilities for JiT-RCDM.
 Architecture overview
 ---------------------
   PatchEmbed      : image (B, C, H, W) → token sequence (B, N, hidden_dim)
-                    [fix-5b] No learned pos_embed — 2D RoPE is applied inside Attention.
-  Attention       : [fix-5c] Custom MHA with QK-RMSNorm and 2D RoPE.
+                    No learned pos_embed — 2D RoPE is applied inside Attention.
+  Attention       : Custom MHA with QK-RMSNorm and 2D RoPE.
   JiTBlock        : Transformer block with adaLN-Zero conditioning.
-                    [fix-5a] RMSNorm replaces LayerNorm (via AdaLNZero).
-                    [fix-5d] SwiGLU FFN replaces GELU FFN.
+                    RMSNorm replaces LayerNorm (via AdaLNZero).
+                    SwiGLU FFN replaces GELU FFN.
   FinalLayer      : token sequence → patch pixels (B, N, patch_size²·C)
-                    [fix-5a] RMSNorm replaces LayerNorm.
+                    RMSNorm replaces LayerNorm.
   JiT             : full model — forward(z_t, t, h) → x_pred
-                    [fix-3]  learnable null_h parameter for CFG.
-                    [fix-5b] 2D RoPE buffer (freqs_cis) registered on the model.
+                    learnable null_h parameter for CFG.
+                    2D RoPE buffer (freqs_cis) registered on the model.
 
 Conditioning
 ------------
@@ -43,10 +43,10 @@ Preset factory functions
 Flow-matching utilities
 -----------------------
   FlowMatching.training_loss  : x-prediction MSE with logit-normal t sampling
-                                [fix-4b] mu=-0.8, sigma=0.8 (JiT paper Tab. 3)
-                                [fix-3]  uses learnable null_h for CFG dropout
+                                mu=-0.8, sigma=0.8 (JiT paper Tab. 3)
+                                uses learnable null_h for CFG dropout
   FlowMatching.sample         : 50-step Heun ODE solver from noise to image
-                                [fix-3]  uses learnable null_h for unconditional pass
+                                uses learnable null_h for unconditional pass
 
 Paper references
 ----------------
@@ -70,9 +70,9 @@ from .conditioning import AdaLNZero, ConditioningProjector, RMSNorm
 
 def timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     """
-    Sinusoidal embedding for a continuous scalar t ∈ [0, 1].
+    Sinusoidal embedding for a continuous scalar t ∈ [0, 1]
 
-    We scale t to [0, 1000] to match the frequency range sinusoidal
+    scale t to [0, 1000] to match the frequency range sinusoidal
     embeddings were designed for in discrete DDPM.  This gives the MLP a
     rich, smooth signal across the full range of flow-matching timesteps.
 
@@ -94,7 +94,7 @@ def timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# ── JiT-RCDM [fix-5b]: 2D RoPE helper functions ──
+# ── JiT-RCDM: 2D RoPE helper functions ──
 # ---------------------------------------------------------------------------
 
 def compute_2d_rope_freqs(grid_size: int, head_dim: int, theta: float = 10000.0) -> torch.Tensor:
@@ -139,7 +139,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# ── JiT-RCDM [fix-5c]: Custom Attention with QK-norm and 2D RoPE ──
+# ── JiT-RCDM: Custom Attention with QK-norm and 2D RoPE ──
 # ---------------------------------------------------------------------------
 
 class Attention(nn.Module):
@@ -181,7 +181,7 @@ class Attention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# ── JiT-RCDM [fix-5d]: SwiGLU FFN replaces GELU FFN ──
+# ── JiT-RCDM: SwiGLU FFN replaces GELU FFN ──
 # ---------------------------------------------------------------------------
 
 class SwiGLU(nn.Module):
@@ -350,17 +350,17 @@ class JiT(nn.Module):
     continuous cond_proj(h) where h is the DinoV3 CLS token.
 
     Fixes applied relative to the original codebase:
-      [fix-3]  Learnable null_h parameter for classifier-free guidance.
-      [fix-4b] Logit-normal t-sampler: mu=-0.8, sigma=0.8 (JiT Tab. 3).
-      [fix-5a] RMSNorm replaces LayerNorm in AdaLNZero and FinalLayer.
-      [fix-5b] 2D RoPE replaces learned positional embedding.
-      [fix-5c] Custom Attention with per-head QK-RMSNorm.
-      [fix-5d] SwiGLU FFN replaces GELU FFN.
+    Learnable null_h parameter for classifier-free guidance.
+    Logit-normal t-sampler: mu=-0.8, sigma=0.8 (JiT Tab. 3).
+    RMSNorm replaces LayerNorm in AdaLNZero and FinalLayer.
+    2D RoPE replaces learned positional embedding.
+    Custom Attention with per-head QK-RMSNorm.
+    SwiGLU FFN replaces GELU FFN.
 
     cond_dim controls the width of the shared conditioning signal c.
     Setting cond_dim == hidden_dim (default) gives the paper-faithful path.
     Setting cond_dim < hidden_dim (e.g. 128) adds a regularising bottleneck —
-    see preset factory functions JiT_S_16 / JiT_S_32.
+    see new preset factory functions JiT_S_16 / JiT_S_32.
 
     Inputs:
         z_t : (B, C, H, W)   noisy image at flow-matching time t
@@ -493,7 +493,7 @@ class JiT(nn.Module):
         # Patchify noisy image
         x = self.patch_embed(z_t)       # (B, N, hidden_dim)
 
-        # ── JiT-RCDM [fix-5b]: retrieve RoPE buffer (already on the right device) ──
+        # ── JiT-RCDM: retrieve RoPE buffer (already on the right device) ──
         freqs_cis = self.freqs_cis   # (N, head_dim//2) complex, moves with .to(device)
 
         # Apply all JiT blocks — each block maps c → 6·hidden_dim modulation params
@@ -561,7 +561,7 @@ class FlowMatching:
             else:
                 h = h.masked_fill(mask, 0.0)
 
-        # ── JiT-RCDM [fix-4b]: logit-normal t-sampler: mu=-0.8, sigma=0.8 (JiT paper Tab. 3) ──
+        # ── JiT-RCDM: logit-normal t-sampler: mu=-0.8, sigma=0.8 (JiT paper Tab. 3) ──
         u = -0.8 + 0.8 * torch.randn(B, device=device)   # JiT paper Tab. 3: mu=-0.8, sigma=0.8
         t = torch.sigmoid(u)               # logit-normal in (0, 1)
 
@@ -589,7 +589,7 @@ class FlowMatching:
             noise     : (B, C, H, W) starting Gaussian noise
             h         : (B, h_dim) DinoV3 representations
             num_steps : ODE steps (default 50)
-            cfg_scale : guidance strength (1.0 = no guidance, 3.0 = recommended).
+            cfg_scale : guidance strength (1.0 = standard, 3.0 = recommended/amplifing).
                         Requires the model to have been trained with p_uncond > 0.
 
         Returns:
@@ -601,7 +601,7 @@ class FlowMatching:
         dt      = 1.0 / num_steps
         use_cfg = cfg_scale > 1.0
 
-        # ── JiT-RCDM [fix-3]: use learnable null_h for unconditional pass ──
+        # ── JiT-RCDM: use learnable null_h for unconditional pass ──
         if use_cfg:
             null = getattr(model, 'null_h', None)
             h_null = (null.unsqueeze(0).expand(B, -1).to(device)
@@ -720,7 +720,7 @@ def JiT_S_32(image_size: int = 224, h_dim: int = 384, **kwargs) -> JiT:
     Same width as JiT_S_16 (hidden_dim=384, cond_dim=128) but patch_size=32
     → 49 tokens instead of 196 at 224×224. Attention cost scales with N²,
     so this gives ~16× cheaper attention blocks. Recommended when memory or
-    compute is very tight.
+    compute is tight
     """
     assert image_size % 32 == 0, f"image_size {image_size} must be divisible by 32"
     return JiT(
