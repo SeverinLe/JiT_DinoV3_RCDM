@@ -7,10 +7,10 @@ Architecture overview
 ---------------------
   PatchEmbed      : image (B, C, H, W) → token sequence (B, N, hidden_dim)
                     No learned pos_embed — 2D RoPE is applied inside Attention.
-  Attention       : Custom MHA with QK-RMSNorm and 2D RoPE.
+  Attention       : MHA with QK-RMSNorm and 2D RoPE.
   JiTBlock        : Transformer block with adaLN-Zero conditioning.
                     RMSNorm replaces LayerNorm (via AdaLNZero).
-                    SwiGLU FFN replaces GELU FFN.
+                    SwiGLU FFN.
   FinalLayer      : token sequence → patch pixels (B, N, patch_size²·C)
                     RMSNorm replaces LayerNorm.
   JiT             : full model — forward(z_t, t, h) → x_pred
@@ -139,13 +139,12 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# ── JiT-RCDM: Custom Attention with QK-norm and 2D RoPE ──
+# ── JiT-RCDM: Attention with QK-norm and 2D RoPE ──
 # ---------------------------------------------------------------------------
 
 class Attention(nn.Module):
     """
     Multi-head self-attention with QK-norm and 2D RoPE (JiT paper recipe).
-    Replaces nn.MultiheadAttention.
     """
 
     def __init__(self, hidden_dim: int, num_heads: int):
@@ -181,7 +180,7 @@ class Attention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# ── JiT-RCDM: SwiGLU FFN replaces GELU FFN ──
+# ── JiT-RCDM: SwiGLU ──
 # ---------------------------------------------------------------------------
 
 class SwiGLU(nn.Module):
@@ -215,7 +214,7 @@ class PatchEmbed(nn.Module):
     image (B, C, H, W)  →  tokens (B, N, hidden_dim)
     where N = (H // patch_size) * (W // patch_size).
 
-    [fix-5b] Learned positional embedding removed; 2D RoPE is applied
+    Learned positional embedding removed; 2D RoPE is applied
     inside the Attention module via the freqs_cis buffer on JiT.
     """
 
@@ -230,7 +229,7 @@ class PatchEmbed(nn.Module):
             in_channels, hidden_dim,
             kernel_size=patch_size, stride=patch_size,
         )
-        # ── JiT-RCDM [fix-5b]: pos_embed removed; RoPE replaces it ──
+        # ── JiT-RCDM: pos_embed removed; RoPE replaces it ──
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)                        # (B, D, H/p, W/p)
