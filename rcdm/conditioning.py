@@ -16,10 +16,7 @@ Origin / changes vs upstream repos
                            output dim is now configurable via cond_dim (default 768).
 
   AdaLNZero              : NEW — from JiT / DiT (Peebles & Xie 2022).
-                           RCDM conditioned a CNN via ConditionalBatchNorm2d.
                            JiT conditions a token sequence (B, N, D) via adaLN-Zero.
-                           RCDM's cBN cannot be used here — it assumes spatial 2-D
-                           feature maps (B, C, H, W), not token sequences.
                            Norm: nn.LayerNorm (JiT original) → RMSNorm (our change).
 """
 
