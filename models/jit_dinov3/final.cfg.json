@@ -1,0 +1,18 @@
+{
+  "file": "final.pt",
+  "step": 100000,
+  "has_ema": true,
+  "wandb_run_id": "c48aue7x",
+  "sha256": "f5f208322aaffa26c4c94bc572cfc0f6c10356c591927f75308f86fafa7a9648",
+  "size_bytes": 411020631,
+  "model_cfg": {
+    "image_size": 224,
+    "patch_size": 16,
+    "hidden_dim": 384,
+    "depth": 12,
+    "num_heads": 6,
+    "h_dim": 384,
+    "cond_dim": 128,
+    "encoder": "dinov3"
+  }
+}

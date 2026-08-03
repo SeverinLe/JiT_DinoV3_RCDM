@@ -1,0 +1,18 @@
+{
+  "file": "step0055000.pt",
+  "step": 55000,
+  "has_ema": true,
+  "wandb_run_id": "c48aue7x",
+  "sha256": "6909d1c04b252fe6872a33f05e95d666c1d290927c62acffef6b0e5686c9a65e",
+  "size_bytes": 411018967,
+  "model_cfg": {
+    "image_size": 224,
+    "patch_size": 16,
+    "hidden_dim": 384,
+    "depth": 12,
+    "num_heads": 6,
+    "h_dim": 384,
+    "cond_dim": 128,
+    "encoder": "dinov3"
+  }
+}

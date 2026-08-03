@@ -1,0 +1,36 @@
+# JiT-RCDM — Python dependencies
+#
+# Tested with Python 3.13.13 on macOS (Apple Silicon, MPS) for inference/experiments
+# and on Google Colab (NVIDIA A100) for training.
+#
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# Install PyTorch first if you need a specific CUDA build:
+#   https://pytorch.org/get-started/locally/
+
+# ── Core: model, data, encoders ──────────────────────────────────────────────
+torch==2.11.0
+torchvision==0.26.0
+numpy==2.4.4
+pillow==12.2.0
+tqdm==4.67.3
+
+# RETFound ViT-Large is instantiated through timm; DinoV3 through transformers.
+timm==1.0.27
+transformers>=4.40,<5
+safetensors==0.8.0
+huggingface_hub==1.19.0
+
+# ── Experiments: metrics, statistics, figures ────────────────────────────────
+# E1 (FID), E2 (SSIM / variability), E5 (linear probe + significance tests)
+pytorch-fid>=0.3.0
+scikit-image>=0.24
+scikit-learn>=1.5
+scipy>=1.14
+matplotlib>=3.9
+pandas>=2.2
+
+# ── Experiment tracking (optional) ───────────────────────────────────────────
+# Every script runs without it; pass --no_wandb to disable.
+wandb>=0.17

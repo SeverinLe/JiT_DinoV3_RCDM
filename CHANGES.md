@@ -320,19 +320,21 @@ Four architectural components that were not yet matching the JiT specification:
 Precomputed representation files are **invalidated** when the encoder changes. Regenerate from scratch:
 
 ```bash
-# 1. Edit checkpoints/dinov3_vits16_tmp/config.json → "use_gated_mlp": false
+# 1. Edit encoders/dinov3_vits16/config.json → "use_gated_mlp": false
 
 # 2. Precompute representations — output shape (N, 384)
-python scripts/precompute_reps.py \
-    --data_dir  data/messidor2/train \
-    --out_file  data/messidor2/train_reps.pt \
+python data/scripts/precompute_reps.py \
+    --encoder   dinov3 \
+    --data_dir  data/raw/messidor2/train \
+    --out_file  data/processed/messidor2/dinov3/train_reps.pt \
     --device    cpu
 
 # 3. Train with JiT_S_16 preset
 python scripts/train.py \
+    --encoder      dinov3 \
     --model        S16 \
-    --reps_file    data/messidor2/train_reps.pt \
-    --save_dir     checkpoints/ \
+    --reps_file    data/processed/messidor2/dinov3/train_reps.pt \
+    --save_dir     models/jit_dinov3 \
     --image_size   224 \
     --cfg_dropout  0.1 \
     --total_steps  50000 \
@@ -344,3 +346,67 @@ python scripts/train.py \
 Old `.pt` files with shape `(N, 2048)` will fail the assertion in `precompute_reps.py` and cause a shape mismatch in the model. They must be deleted and regenerated.
 
 Checkpoints trained before fix-5 used `attn.in_proj_weight` (nn.MultiheadAttention) and had a `pos_embed` parameter. These are **incompatible** with the current architecture and must be retrained from scratch.
+
+---
+
+## 6 — Repository restructure (2026-08-03)
+
+A reorganisation into a layout that matches how the study is actually
+structured, plus three correctness findings that came out of auditing the
+artefacts.  No model or training behaviour changed.
+
+### Layout
+
+| Before | After | Why |
+|---|---|---|
+| `checkpoints/` (mixed) | `encoders/` + `models/` | The frozen encoder is the study's independent variable, the generator trained on it the dependent one; mixing them in one directory hid that |
+| `data/MESSIDOR2/` | `data/raw/messidor2/` + `data/processed/messidor2/<encoder>/` | Representation caches are per-encoder derived artefacts, not source data |
+| `scripts/precompute_reps.py` | `data/scripts/precompute_reps.py` | Data preparation belongs with the data |
+| `rcdm/encoder.py` + `encoder_retfound.py` | `rcdm/encoders/` registry | Two divergent copies of near-identical code; now one interface, one line per encoder |
+| `scripts/sampling.py` + `sampling_retfound.py` | `experiments/sample_grid.py --encoder` | Same duplication, same fix |
+| ad-hoc probe scripts on a local branch | `experiments/E1-E5` | One script per research question, each writing a manifested run directory |
+
+### Findings from the audit
+
+**The 100k checkpoint was misnamed.** `jit_rcdm_retfound_step0100000.pt` reports
+`h_dim: 384` in its stored `model_cfg` — it is a **DinoV3** model, not RETFound
+(which would be 1024).  Every checkpoint in the tree was loaded and checked;
+none had `h_dim: 1024`, so **no RETFound-conditioned generator has ever been
+trained**.  The file is now `models/jit_dinov3/final.pt`.
+
+Two mitigations: `scripts/train.py` writes `encoder` into `model_cfg`, and it
+refuses to start when `--encoder` disagrees with the representation cache.
+`experiments/common.py` raises when a generator is paired with an encoder of the
+wrong width, instead of producing plausible-looking nonsense.
+
+**Two ablation directories disagreed with their contents.**
+`S16_128conddim_dino/` held `hidden_dim: 768, cond_dim: 768`, and
+`S32_dino/jit_rcdm_final.pt` had `patch_size: 16`.  Those runs are now
+identified by W&B run id rather than by directory name.
+
+**`scripts/train.py` on `main` was not the trainer that produced the results.**
+It imported `guided_diffusion` alongside the JiT modules and called
+`create_named_schedule_sampler`, which was never imported — a half-migrated file
+that would raise `NameError`.  The working JiT trainer existed only on the
+local-only branch `claude/silly-faraday-d8512b`.  It is now `scripts/train.py`;
+both versions are in `archive/scripts/`.
+
+### Reproducibility additions
+
+- `requirements.txt` with pinned versions (there were none).
+- `.gitignore` for data, weights, results and `wandb/` (there was none).
+- Every experiment writes `run_config.json` — arguments, seed, git commit,
+  checkpoint sha256, library versions — before it starts computing.
+- `models/*.cfg.json` sidecars record each checkpoint's config and sha256.
+- `tests/test_pipeline.py`: encoder widths, adaLN-Zero zero-init, denoiser
+  shapes, sampler finiteness, representation-cache alignment.
+
+### Removed
+
+~20.5 GB of superseded checkpoints, a duplicate 3.7 GB RETFound file, the
+vendored `JiT/` and `guided_diffusion/` upstreams, and legacy sample outputs.
+All source code and notebooks are preserved in `archive/`; `archive/MANIFEST.md`
+records every removed artefact with its size, stored config and W&B run id.
+
+Note: `guided_diffusion` was `pip install -e`'d into the virtualenv, so
+`import guided_diffusion` no longer resolves.  Nothing in the JiT path used it.

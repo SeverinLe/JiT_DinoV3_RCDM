@@ -1,43 +1,30 @@
 """
 scripts/train.py
 
-Train a JiT-RCDM generator on precomputed frozen-encoder representations.
-
-The encoder is never loaded here — representations come from a cache built by
-data/scripts/precompute_reps.py, so this script is encoder-agnostic and only
-needs to know h_dim.  --encoder is recorded in the checkpoint so that every
-downstream experiment can verify which representation space a model belongs to.
+Train JiT-RCDM on Messidor-2 fundus images using precomputed DinoV3
+representations.
 
 What changed from the original RCDM train.py
 ---------------------------------------------
   - Model      : UNetModel → JiT (plain ViT with adaLN-Zero)
-  - Encoder h  : 2048-dim ResNet-50 avgpool → frozen SSL CLS token
-                 (384 DinoV3 ViT-S/16, or 1024 RETFound ViT-L/16)
+  - Encoder h  : 2048-dim ResNet-50 avgpool → 384-dim DinoV3 CLS token
   - Objective  : ε-prediction + DDPM loss → x-prediction + flow-matching MSE
   - Timesteps  : discrete t ~ Uniform[0,T], 1000 steps → continuous t ~
-                 logit-normal(-0.8, 0.8), no schedule sampler needed
+                 logit-normal(0,1), no schedule sampler needed
   - Sampler    : p_sample_loop (1000 DDPM steps) → 50-step Heun ODE
-  - image_size : 64 (Tiny ImageNet) → 224 (retinal / encoder canonical)
+  - image_size : 64 (Tiny ImageNet) → 224 (Messidor-2 / DinoV3 canonical)
   - Monitoring : wandb — loss, grad norm, LR, sample image grids
 
-Usage — DinoV3 (h_dim 384), the configuration that produced models/jit_dinov3:
+Usage (from project root):
     python scripts/train.py \\
-        --encoder     dinov3 \\
-        --reps_file   data/processed/messidor2/dinov3/train_reps.pt \\
-        --save_dir    models/jit_dinov3 \\
-        --model       S16 \\
+        --reps_file   data/messidor2/train_reps.pt \\
+        --save_dir    checkpoints/ \\
+        --image_size  224 \\
         --batch_size  8 \\
         --lr          1e-4 \\
         --total_steps 100000 \\
-        --device      cuda
-
-Usage — RETFound CFP (h_dim 1024), the run that is not yet executed:
-    python scripts/train.py \\
-        --encoder     retfound_cfp \\
-        --reps_file   data/processed/messidor2/retfound_cfp/train_reps.pt \\
-        --save_dir    models/jit_retfound_cfp \\
-        --model       S16 \\
-        --batch_size  8 --lr 1e-4 --total_steps 100000 --device cuda
+        --device      cuda \\
+        --wandb_project jit-rcdm
 
 Add --no_wandb to run without Weights & Biases.
 """
@@ -55,7 +42,6 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from rcdm.jit import create_jit_model, JiT_S_16, JiT_S_32, FlowMatching
 from rcdm.dataset import RepresentationDataset
-from rcdm.encoders import ENCODER_NAMES, get_h_dim
 
 # ── JiT-RCDM [fix-1]: EMA (Exponential Moving Average of model weights) ──
 # JiT paper (Tab. 9) shows EMA at decay=0.9999 gives the best FID.
@@ -168,16 +154,8 @@ def make_sample_grid(
 # ---------------------------------------------------------------------------
 
 def _model_cfg(model, args) -> dict:
-    """
-    Read architecture dims from the live model so presets are recorded correctly.
-
-    "encoder" is stored alongside the dims because h_dim alone is ambiguous once
-    more than one encoder is in play, and because a checkpoint whose filename
-    disagrees with its contents is worse than useless — see archive/MANIFEST.md
-    for what that cost us.
-    """
+    """Read architecture dims from the live model so presets are recorded correctly."""
     return {
-        "encoder":    args.encoder,
         "image_size": model.image_size,
         "patch_size": model.patch_size,
         "hidden_dim": model.hidden_dim,
@@ -196,12 +174,8 @@ def main():
     parser = argparse.ArgumentParser()
 
     # Data / training
-    parser.add_argument("--encoder",       type=str,   default="dinov3", choices=ENCODER_NAMES,
-                        help="Which frozen encoder produced --reps_file. Sets the "
-                             "default --h_dim and is recorded in the checkpoint.")
-    parser.add_argument("--reps_file",     type=str,
-                        default="data/processed/messidor2/dinov3/train_reps.pt")
-    parser.add_argument("--save_dir",      type=str,   default="models/jit_dinov3")
+    parser.add_argument("--reps_file",     type=str,   default="data/messidor2/train_reps.pt")
+    parser.add_argument("--save_dir",      type=str,   default="checkpoints/")
     parser.add_argument("--image_size",    type=int,   default=224)
     parser.add_argument("--batch_size",    type=int,   default=8)
     parser.add_argument("--lr",            type=float, default=1e-4)
@@ -243,9 +217,8 @@ def main():
     parser.add_argument("--patch_size",    type=int,   default=16,
                         help="Patch size in pixels (image_size % patch_size == 0). "
                              "Ignored when --model is set.")
-    parser.add_argument("--h_dim",         type=int,   default=None,
-                        help="Representation width. Defaults to the width of "
-                             "--encoder (dinov3=384, retfound_cfp=1024, resnet50=2048).")
+    parser.add_argument("--h_dim",         type=int,   default=384,
+                        help="DinoV3 CLS token dimension (384 for ViT-S/16)")
     parser.add_argument("--cond_dim",      type=int,   default=None,
                         help="Conditioning bottleneck width (default = hidden_dim, "
                              "i.e. no bottleneck). Preset S16/S32 use 64. "
@@ -272,27 +245,6 @@ def main():
                              "A model trained with 0.0 cannot use cfg_scale > 1 at inference.")
 
     args = parser.parse_args()
-
-    # Resolve h_dim from the encoder unless explicitly overridden, then check it
-    # against the cache. A silent mismatch here trains a model whose conditioning
-    # projector expects the wrong width — it will "work" and produce garbage.
-    if args.h_dim is None:
-        args.h_dim = get_h_dim(args.encoder)
-    _cache_meta = torch.load(args.reps_file, map_location="cpu", weights_only=False)
-    _cache_h_dim = _cache_meta.get("h_dim", _cache_meta["reps"].shape[1])
-    _cache_encoder = _cache_meta.get("encoder")
-    if _cache_h_dim != args.h_dim:
-        raise ValueError(
-            f"--h_dim {args.h_dim} (encoder '{args.encoder}') does not match "
-            f"{args.reps_file}, which holds {_cache_h_dim}-dim representations"
-            + (f" from encoder '{_cache_encoder}'." if _cache_encoder else ".")
-        )
-    if _cache_encoder and _cache_encoder != args.encoder:
-        raise ValueError(
-            f"--encoder '{args.encoder}' contradicts {args.reps_file}, which was "
-            f"built with '{_cache_encoder}'."
-        )
-    del _cache_meta
 
     use_wandb = (not args.no_wandb) and WANDB_AVAILABLE
     if not args.no_wandb and not WANDB_AVAILABLE:
