@@ -153,13 +153,72 @@ def mcnemar(baseline_correct: np.ndarray, condition_correct: np.ndarray) -> dict
 
 
 def ci95(values: np.ndarray) -> tuple:
-    """Mean and normal-approximation 95% CI over seeds."""
+    """Mean and normal-approximation 95% CI over repeated fits."""
     values = np.asarray(values, dtype=float)
     mean = float(np.nanmean(values))
     if len(values) < 2:
         return mean, mean, mean
     sem = float(np.nanstd(values, ddof=1) / np.sqrt(len(values)))
     return mean, mean - 1.96 * sem, mean + 1.96 * sem
+
+
+def bootstrap_test_ci(y_true, y_pred, y_proba, classes,
+                      n_boot: int = 10_000, seed: int = 0) -> dict:
+    """
+    Percentile bootstrap CIs for balanced accuracy and macro-AUC, resampling the
+    *test set*.
+
+    These are the intervals that belong on the figure.  Refitting the probe under
+    different RNG seeds produces bit-identical results — sklearn's lbfgs solver is
+    deterministic given the data — so a CI computed over seeds is zero-width and
+    misrepresents the uncertainty as nil.  The real variability is in which images
+    happen to be in the test set, and that is what resampling here estimates.
+
+    Stratified resampling keeps each class's count fixed, so both metrics stay
+    defined even though the two most advanced grades have only 23 and 11 test
+    images.  That scarcity is exactly why the intervals come out wide, and the
+    report should say so rather than quoting the point estimate alone.
+
+    Returns:
+        {"balanced_accuracy": {...}, "macro_auc": {...}} with mean and ci95.
+    """
+    from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+
+    rng = np.random.default_rng(seed)
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    y_proba = np.asarray(y_proba)
+    class_indices = [np.flatnonzero(y_true == c) for c in np.unique(y_true)]
+
+    accuracies, aucs = [], []
+    for _ in range(n_boot):
+        picked = np.concatenate([
+            rng.choice(idx, size=len(idx), replace=True) for idx in class_indices
+        ])
+        accuracies.append(balanced_accuracy_score(y_true[picked], y_pred[picked]))
+        try:
+            aucs.append(roc_auc_score(y_true[picked], y_proba[picked],
+                                      multi_class="ovr", average="macro",
+                                      labels=classes))
+        except ValueError:
+            aucs.append(np.nan)
+
+    def _summarise(point, draws):
+        lo, hi = np.nanpercentile(draws, [2.5, 97.5])
+        return {"mean": float(point), "ci95": [float(lo), float(hi)],
+                "ci_source": "stratified bootstrap over test set"}
+
+    try:
+        auc_point = roc_auc_score(y_true, y_proba, multi_class="ovr",
+                                  average="macro", labels=classes)
+    except ValueError:
+        auc_point = float("nan")
+
+    return {
+        "balanced_accuracy": _summarise(
+            balanced_accuracy_score(y_true, y_pred), accuracies),
+        "macro_auc": _summarise(auc_point, aucs),
+    }
 
 
 def main() -> None:
@@ -174,7 +233,12 @@ def main() -> None:
                              "enables condition C. Produce it by running "
                              "precompute_reps.py over a transformed copy of the "
                              "test split (see E3 for the transform set).")
-    parser.add_argument("--n_seeds", type=int, default=5)
+    parser.add_argument("--n_seeds", type=int, default=5,
+                        help="Probe refits. Note the solver is deterministic, so "
+                             "this checks fit stability rather than producing the "
+                             "error bars — those come from --n_boot.")
+    parser.add_argument("--n_boot", type=int, default=10_000,
+                        help="Bootstrap resamples of the test set for the CI")
     parser.add_argument("--n_random_controls", type=int, default=5,
                         help="Random dimension subsets of the same size as the "
                              "E4 set, as a control for condition B")
@@ -240,7 +304,7 @@ def main() -> None:
         print("  [E3] no --transformed_reps — condition C skipped")
 
     # ---- fit -----------------------------------------------------------------
-    rows, correct_masks = [], {}
+    rows, correct_masks, predictions = [], {}, {}
     for name, (train_features, test_features, test_labels) in conditions.items():
         for seed in range(args.n_seeds):
             set_seed(seed)
@@ -249,6 +313,7 @@ def main() -> None:
             rows.append({"condition": name, "seed": seed, **metrics})
             if seed == 0:
                 correct_masks[name] = (y_pred == test_labels)
+                predictions[name] = (test_labels, y_pred, y_proba)
             print(f"  {name:24s} seed {seed}  "
                   f"bal_acc {metrics['balanced_accuracy']:.4f}  "
                   f"auc {metrics['macro_auc']:.4f}")
@@ -261,13 +326,19 @@ def main() -> None:
     for name in conditions:
         values = np.array([r["balanced_accuracy"] for r in rows if r["condition"] == name])
         aucs = np.array([r["macro_auc"] for r in rows if r["condition"] == name])
-        mean, lo, hi = ci95(values)
-        auc_mean, auc_lo, auc_hi = ci95(aucs)
-        summary[name] = {
-            "balanced_accuracy": {"mean": mean, "ci95": [lo, hi]},
-            "macro_auc": {"mean": auc_mean, "ci95": [auc_lo, auc_hi]},
+        seed_mean, seed_lo, seed_hi = ci95(values)
+
+        # The reported intervals come from resampling the test set, not from
+        # refitting: see bootstrap_test_ci for why the seed spread is degenerate.
+        test_labels, y_pred, y_proba = predictions[name]
+        summary[name] = bootstrap_test_ci(test_labels, y_pred, y_proba, classes,
+                                          args.n_boot, seed=0)
+        summary[name]["seed_spread"] = {
+            "balanced_accuracy_mean": seed_mean, "ci95": [seed_lo, seed_hi],
             "n_seeds": int(len(values)),
+            "note": "zero-width when the solver is deterministic",
         }
+        del aucs
 
     baseline = correct_masks.get("A_full")
     for name, mask in correct_masks.items():
@@ -294,7 +365,8 @@ def main() -> None:
                label=f"chance ({1 / len(classes):.2f})")
     ax.set_ylabel("balanced accuracy")
     ax.set_title(f"E5 — linear probe on frozen {args.encoder} representations\n"
-                 f"error bars: 95% CI over {args.n_seeds} seeds")
+                 f"error bars: 95% CI, stratified bootstrap over the test set "
+                 f"(n={len(y_test)})")
     ax.legend()
     plt.setp(ax.get_xticklabels(), rotation=25, ha="right")
     fig.savefig(run_dir / "figures" / "probe_conditions.png")

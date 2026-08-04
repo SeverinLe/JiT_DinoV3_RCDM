@@ -1,0 +1,58 @@
+  W&B run: https://wandb.ai/severinle-johannes-kepler-universit-t-linz/jit-rcdm/runs/6h9y3bt6
+
+[4/4] Starting training...
+
+step   95100/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   95200/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   95300/100000 | loss 0.0005 | grad_norm 0.011 | lr 1.00e-04
+step   95400/100000 | loss 0.0004 | grad_norm 0.013 | lr 1.00e-04
+step   95500/100000 | loss 0.0005 | grad_norm 0.012 | lr 1.00e-04
+step   95600/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   95700/100000 | loss 0.0004 | grad_norm 0.010 | lr 1.00e-04
+step   95800/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   95900/100000 | loss 0.0005 | grad_norm 0.014 | lr 1.00e-04
+step   96000/100000 | loss 0.0005 | grad_norm 0.011 | lr 1.00e-04
+step   96100/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   96200/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   96300/100000 | loss 0.0004 | grad_norm 0.014 | lr 1.00e-04
+step   96400/100000 | loss 0.0005 | grad_norm 0.016 | lr 1.00e-04
+step   96500/100000 | loss 0.0005 | grad_norm 0.014 | lr 1.00e-04
+step   96600/100000 | loss 0.0004 | grad_norm 0.010 | lr 1.00e-04
+step   96700/100000 | loss 0.0005 | grad_norm 0.014 | lr 1.00e-04
+step   96800/100000 | loss 0.0005 | grad_norm 0.013 | lr 1.00e-04
+step   96900/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   97000/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   97100/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   97200/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   97300/100000 | loss 0.0005 | grad_norm 0.011 | lr 1.00e-04
+step   97400/100000 | loss 0.0005 | grad_norm 0.012 | lr 1.00e-04
+step   97500/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   97600/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   97700/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   97800/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   97900/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   98000/100000 | loss 0.0004 | grad_norm 0.010 | lr 1.00e-04
+step   98100/100000 | loss 0.0004 | grad_norm 0.010 | lr 1.00e-04
+step   98200/100000 | loss 0.0005 | grad_norm 0.011 | lr 1.00e-04
+step   98300/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   98400/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   98500/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   98600/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   98700/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   98800/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   98900/100000 | loss 0.0004 | grad_norm 0.010 | lr 1.00e-04
+step   99000/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   99100/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   99200/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   99300/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   99400/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   99500/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   99600/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step   99700/100000 | loss 0.0004 | grad_norm 0.012 | lr 1.00e-04
+step   99800/100000 | loss 0.0004 | grad_norm 0.010 | lr 1.00e-04
+step   99900/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+step  100000/100000 | loss 0.0004 | grad_norm 0.011 | lr 1.00e-04
+  → checkpoint: /content/drive/MyDrive/jit_rcdm/checkpoints_retfound/jit_rcdm_step0100000.pt
+[34m[1mwandb[0m: [33mWARNING[0m Symlinked 1 file into the W&B run directory; call wandb.save again to sync new files.
+
+Training complete. Final model saved to /content/drive/MyDrive/jit_rcdm/checkpoints_retfound/jit_rcdm_final.pt

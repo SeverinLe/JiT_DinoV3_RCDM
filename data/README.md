@@ -31,10 +31,16 @@ severity-graded folders in ImageFolder layout.
 |---|---|---|---|---|---|---|
 | train | 972 | 568 | 151 | 193 | 41 | 19 |
 | val | 246 | 143 | 38 | 49 | 11 | 5 |
-| test | 527 | 306 | 81 | 105 | 23 | 11 |
+| test | 526 | 306 | 81 | 105 | 23 | 11 |
 
 Folder names sort into severity order (`a` … `e`) — no-DR, mild, moderate,
 severe, proliferative.
+
+The test split is sometimes quoted as 527.  The extra file was `test/cat.png`,
+a non-retinal image sitting outside the class folders; it was removed in the
+2026-08-03 restructure.  `precompute_reps.py` walks recursively, so it would
+have been encoded and given the label `test` — worth knowing if any earlier
+number looks off by one.
 
 **Two properties that must be reported alongside any result on this data.**
 

@@ -1,7 +1,8 @@
 # JiT-RCDM — Python dependencies
 #
-# Tested with Python 3.13.13 on macOS (Apple Silicon, MPS) for inference/experiments
-# and on Google Colab (NVIDIA A100) for training.
+# Versions below are the ones this environment actually runs: Python 3.13.13 on
+# macOS/Apple Silicon (MPS) for representation caching and experiments, and
+# Google Colab (NVIDIA A100) for training.
 #
 #   python -m venv .venv && source .venv/bin/activate
 #   pip install -r requirements.txt
@@ -17,20 +18,24 @@ pillow==12.2.0
 tqdm==4.67.3
 
 # RETFound ViT-Large is instantiated through timm; DinoV3 through transformers.
+# huggingface_hub is pinned by transformers 4.57 to the 0.x line — do not raise
+# it to 1.x without checking, the two are not compatible.
 timm==1.0.27
-transformers>=4.40,<5
+transformers==4.57.6
+huggingface_hub==0.36.2
 safetensors==0.8.0
-huggingface_hub==1.19.0
 
 # ── Experiments: metrics, statistics, figures ────────────────────────────────
-# E1 (FID), E2 (SSIM / variability), E5 (linear probe + significance tests)
-pytorch-fid>=0.3.0
-scikit-image>=0.24
-scikit-learn>=1.5
-scipy>=1.14
-matplotlib>=3.9
-pandas>=2.2
+# E1 FID, E2 SSIM, E3 Wilcoxon, E5 linear probe + bootstrap CIs
+scikit-learn==1.9.0
+scikit-image==0.26.0
+scipy==1.18.0
+matplotlib==3.11.1
+pandas==3.0.5
+
+# E1 only; skipped gracefully with --skip_fid if absent.
+pytorch-fid==0.3.0
 
 # ── Experiment tracking (optional) ───────────────────────────────────────────
 # Every script runs without it; pass --no_wandb to disable.
-wandb>=0.17
+wandb==0.28.1

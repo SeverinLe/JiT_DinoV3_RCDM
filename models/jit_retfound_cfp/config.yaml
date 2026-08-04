@@ -1,0 +1,131 @@
+_wandb:
+    value:
+        cli_version: 0.27.2
+        e:
+            5v65aqflakm64uumsip5x8a38um79q9x:
+                args:
+                    - --model
+                    - S16
+                    - --reps_file
+                    - data/messidor2/train_packed_retfound.pt
+                    - --save_dir
+                    - /content/drive/MyDrive/jit_rcdm/checkpoints_retfound
+                    - --image_size
+                    - "224"
+                    - --h_dim
+                    - "1024"
+                    - --batch_size
+                    - "128"
+                    - --grad_accum
+                    - "1"
+                    - --lr
+                    - "1e-4"
+                    - --warmup_steps
+                    - "2000"
+                    - --total_steps
+                    - "100000"
+                    - --save_interval
+                    - "5000"
+                    - --log_interval
+                    - "100"
+                    - --cfg_dropout
+                    - "0.1"
+                    - --ema_decay
+                    - "0.9999"
+                    - --resume
+                    - /content/drive/MyDrive/jit_rcdm/checkpoints_retfound/jit_rcdm_step0095000.pt
+                    - --wandb_project
+                    - jit-rcdm
+                    - --wandb_run_name
+                    - S16-RETFound-100k-A100
+                    - --device
+                    - cuda
+                codePath: scripts/train.py
+                codePathLocal: scripts/train.py
+                cpu_count: 6
+                cpu_count_logical: 12
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "253055008768"
+                        used: "59196370944"
+                email: severinlechner@aol.com
+                executable: /usr/bin/python3
+                git:
+                    commit: 9e6694ed06ed2eb655b2832035cb3cb34323e016
+                    remote: https://github.com/SeverinLe/master_implementation.git
+                gpu: NVIDIA A100-SXM4-40GB
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "42949672960"
+                      name: NVIDIA A100-SXM4-40GB
+                      uuid: GPU-6d462491-4e81-7e83-31d4-ad89062d95cb
+                host: 28ee4773d802
+                memory:
+                    total: "89629196288"
+                os: Linux-6.6.122+-x86_64-with-glibc2.35
+                program: /content/jit_rcdm/scripts/train.py
+                python: CPython 3.12.13
+                root: /content/jit_rcdm
+                startedAt: "2026-06-16T07:11:32.875821Z"
+                writerId: 5v65aqflakm64uumsip5x8a38um79q9x
+        m: []
+        python_version: 3.12.13
+        t:
+            "1":
+                - 1
+                - 41
+            "2":
+                - 1
+                - 41
+            "3":
+                - 1
+                - 2
+                - 3
+                - 5
+                - 13
+                - 14
+                - 16
+                - 62
+            "4": 3.12.13
+            "5": 0.27.2
+            "12": 0.27.2
+            "13": linux-x86_64
+batch_size:
+    value: 128
+cfg_dropout:
+    value: 0.1
+effective_batch:
+    value: 128
+ema_decay:
+    value: 0.9999
+grad_accum:
+    value: 1
+lr:
+    value: 0.0001
+model/cond_dim:
+    value: 128
+model/depth:
+    value: 12
+model/h_dim:
+    value: 1024
+model/hidden_dim:
+    value: 384
+model/image_size:
+    value: 224
+model/num_heads:
+    value: 6
+model/patch_size:
+    value: 16
+n_train_images:
+    value: 972
+reps_file:
+    value: data/messidor2/train_packed_retfound.pt
+total_params_M:
+    value: 25.8
+total_steps:
+    value: 100000
+warmup_steps:
+    value: 2000
