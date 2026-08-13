@@ -43,6 +43,7 @@ encoders/               frozen pretrained SSL weights — study INPUTS  (not tra
 models/                 trained JiT-RCDM generators — study OUTPUTS   (not tracked)
 
 scripts/train.py        train a generator on cached representations
+notebooks/              Colab notebooks (training, t-sampler ablation)
 experiments/            E1-E5 probes + sample_grid, results/ per experiment
 report/                 figures and tables selected for the write-up
 wandb/                  run logs (compute data for the report)

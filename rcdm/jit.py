@@ -520,6 +520,18 @@ class FlowMatching:
         h → null_h  with prob p_uncond  [fix-3] learnable null token for CFG
         loss = ||f_θ(z_t, t, h) − x||²   MSE in *image* space
 
+    The t-sampler decides how training effort is allocated along the noise-to-
+    data axis, and t=0 is pure noise while t=1 is the clean image.  At low t the
+    input carries no information about x, so the MSE-optimal prediction is
+    E[x|h] — the conditional mean.  mu=-0.8 puts 50% of training mass below
+    t=0.31 and only 2% above t=0.7, which is a deliberate high-noise emphasis
+    tuned for ImageNet-scale JiT.  On a small dataset that allocation can leave
+    the model a conditional-mean predictor: x_pred stops depending on z, and
+    since the ODE solution is then z(t) = mu_h + (1-t)(z_0 - mu_h), the initial
+    noise is annihilated linearly and every sample from one h collapses to the
+    same image.  mu/sigma are therefore constructor arguments, not constants.
+    Defaults reproduce the JiT paper setting exactly.
+
     Sampling (50-step Heun ODE + optional CFG):
         v_θ = (x_pred − z_t) / (1 − t)   velocity from x-prediction
         z_{t+dt} ≈ z_t + dt · (v(z_t,t) + v(z*,t+dt)) / 2
@@ -529,6 +541,19 @@ class FlowMatching:
         blending happens at x_pred level (before velocity) — bounded in image
         space, numerically cleaner than blending velocities directly.
     """
+
+    def __init__(self, t_mu: float = -0.8, t_sigma: float = 0.8):
+        """
+        Args:
+            t_mu:    logit-normal mean.  -0.8 = JiT Tab. 3 (median t 0.31);
+                     0.0 = symmetric, the SD3 default (median t 0.50);
+                     positive values push training mass toward the clean end,
+                     where instance-specific detail is synthesised.
+            t_sigma: logit-normal std.  Wider spreads effort over more of the
+                     axis at the cost of density anywhere.
+        """
+        self.t_mu = t_mu
+        self.t_sigma = t_sigma
 
     def training_loss(
         self,
@@ -561,8 +586,11 @@ class FlowMatching:
             else:
                 h = h.masked_fill(mask, 0.0)
 
-        # ── JiT-RCDM [fix-4b]: logit-normal t-sampler: mu=-0.8, sigma=0.8 (JiT paper Tab. 3) ──
-        u = -0.8 + 0.8 * torch.randn(B, device=device)   # JiT paper Tab. 3: mu=-0.8, sigma=0.8
+        # ── JiT-RCDM: logit-normal t-sampler; defaults mu=-0.8, sigma=0.8 (JiT
+        # paper Tab. 3).  Configurable because the allocation of training mass
+        # along t is what decides whether the model learns a conditional mean or
+        # a conditional distribution — see the class docstring.
+        u = self.t_mu + self.t_sigma * torch.randn(B, device=device)
         t = torch.sigmoid(u)               # logit-normal in (0, 1)
 
         epsilon = torch.randn_like(x)

@@ -185,6 +185,12 @@ def _model_cfg(model, args) -> dict:
         "num_heads":  model.blocks[0].attn.num_heads,
         "h_dim":      args.h_dim,
         "cond_dim":   model.cond_dim,
+        # The t-sampler is part of what a checkpoint *is*: two runs identical in
+        # every architectural dim but differing in t_mu produce very different
+        # samplers (one can be a deterministic conditional-mean predictor).
+        # Recording it is what lets an experiment attribute behaviour correctly.
+        "t_mu":       args.t_mu,
+        "t_sigma":    args.t_sigma,
     }
 
 
@@ -241,7 +247,7 @@ def main():
                         help="Attention heads (hidden_dim // num_heads = head_dim). "
                              "Ignored when --model is set.")
     parser.add_argument("--patch_size",    type=int,   default=16,
-                        help="Patch size in pixels (image_size % patch_size == 0). "
+                        help="Patch size in pixels (image_size %% patch_size == 0). "
                              "Ignored when --model is set.")
     parser.add_argument("--h_dim",         type=int,   default=None,
                         help="Representation width. Defaults to the width of "
@@ -266,6 +272,15 @@ def main():
                         help="Log a sample image grid every N steps")
     parser.add_argument("--n_sample_images",   type=int,   default=4,
                         help="Number of conditioning images shown in sample grids")
+    parser.add_argument("--t_mu",          type=float, default=-0.8,
+                        help="Logit-normal t-sampler mean. -0.8 = JiT Tab. 3 "
+                             "(median t 0.31, 2%% of mass above t=0.7); 0.0 = "
+                             "symmetric/SD3 default (median t 0.50). Low t is "
+                             "the regime where predicting E[x|h] is optimal, so "
+                             "this controls whether the model learns a "
+                             "conditional mean or a conditional distribution.")
+    parser.add_argument("--t_sigma",       type=float, default=0.8,
+                        help="Logit-normal t-sampler std (JiT Tab. 3: 0.8).")
     parser.add_argument("--cfg_dropout",       type=float, default=0.1,
                         help="Probability of replacing h with zeros during training "
                              "(null-h CFG dropout). Set to 0.0 to disable CFG entirely. "
@@ -324,7 +339,8 @@ def main():
         )
     model.to(device)
 
-    flow = FlowMatching()
+    flow = FlowMatching(t_mu=args.t_mu, t_sigma=args.t_sigma)
+    print(f"  t-sampler: logit-normal(mu={args.t_mu}, sigma={args.t_sigma})")
 
     # Restore checkpoint (read wandb run_id for seamless run resumption)
     wandb_run_id = args.wandb_run_id
