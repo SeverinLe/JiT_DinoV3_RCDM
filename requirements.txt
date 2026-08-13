@@ -36,6 +36,10 @@ pandas==3.0.5
 # E1 only; skipped gracefully with --skip_fid if absent.
 pytorch-fid==0.3.0
 
+# E2 lpips_between; the column is written as NaN if absent, everything else in
+# E2 still runs.  Pulls an AlexNet checkpoint on first use.
+lpips==0.1.4
+
 # ── Experiment tracking (optional) ───────────────────────────────────────────
 # Every script runs without it; pass --no_wandb to disable.
 wandb==0.28.1

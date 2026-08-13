@@ -18,6 +18,12 @@ Two complementary measurements, both over the same generated set:
   2. **Distributional realism (FID).**  Frechet Inception Distance between the
      generated set and the corresponding real images.
 
+     The real reference set is written through the *generator's own* training
+     preprocessing (Resize + CenterCrop, see rcdm/dataset.py), not a plain
+     resize.  Messidor-2 frames are roughly 3:2; squashing them to square would
+     put a geometric distortion the generator never saw into the reference
+     distribution and charge it to the model.
+
      Caveat to carry into the report: FID's Inception backbone is ImageNet-
      trained and poorly calibrated for retinal images, and with a few hundred
      images the estimator is biased.  Treat it as a relative signal between
@@ -32,7 +38,7 @@ Usage:
         --checkpoint models/jit_dinov3/final.pt \
         --encoder    dinov3 \
         --test_dir   data/raw/messidor2/test \
-        --n_per_class 40 --cfg_scale 3.0 --num_steps 50 --seed 0 --device cuda
+        --n_per_class 40 --cfg_scale 1.0 --num_steps 50 --seed 0 --device cuda
 
 Output: metrics.csv (per-image ranks), summary.json (MRR/FID + CIs),
         figures/rank_distribution.png, and real/ + generated/ image folders.
@@ -45,6 +51,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from PIL import Image
 
 from common import (
@@ -69,7 +76,24 @@ def tensor_to_pil(x: torch.Tensor) -> Image.Image:
     return Image.fromarray(array)
 
 
-def rank_metrics(h_cond: torch.Tensor, h_gen: torch.Tensor) -> np.ndarray:
+def to_training_view(image: Image.Image, size: int) -> Image.Image:
+    """
+    Put a real image through the generator's own training preprocessing.
+
+    This is byte-for-byte the pipeline in data/scripts/pack_dataset.py (bicubic
+    Resize of the shorter side, then CenterCrop), which is what produced the
+    packed tensor the generator was trained on.  It keeps the aspect ratio.
+
+    Only the FID reference set needs this.  A plain resize to (size, size)
+    anisotropically squashes Messidor-2's ~3:2 frames, so the reference
+    distribution would carry a distortion the generator was never trained to
+    reproduce and FID would charge the difference to the model.
+    """
+    resized = TF.resize(image, size, interpolation=TF.InterpolationMode.BICUBIC)
+    return TF.center_crop(resized, size)
+
+
+def rank_metrics(h_cond: torch.Tensor, h_gen: torch.Tensor) -> tuple:
     """
     Rank of the matching generation for every conditioning representation.
 
@@ -79,19 +103,32 @@ def rank_metrics(h_cond: torch.Tensor, h_gen: torch.Tensor) -> np.ndarray:
     Cosine distance is used rather than L2 because representation norms vary
     considerably across images and the direction carries the semantics.
 
+    Ties are resolved two ways so the reported number can never be an artefact
+    of tie-breaking.  The optimistic rank counts only generations *strictly*
+    closer than the matching one (a tie keeps rank 1); the pessimistic rank puts
+    the matching generation last among its ties.  They are equal unless exact
+    ties occur, which on continuous float32 representations should not happen —
+    main() records the disagreement so "should not happen" is checked rather
+    than assumed.
+
     Args:
         h_cond: (N, D) conditioning representations.
         h_gen:  (N, D) representations of the images generated from them.
 
     Returns:
-        (N,) integer array of 1-based ranks.
+        (ranks_optimistic, ranks_pessimistic), each a (N,) 1-based int array.
     """
     a = F.normalize(h_cond.float(), dim=1)
     b = F.normalize(h_gen.float(), dim=1)
     similarity = a @ b.T                                   # (N, N), higher = closer
     diagonal = similarity.diag().unsqueeze(1)              # (N, 1) self-similarity
+
     # Rank = 1 + how many other generations are closer than the matching one.
-    return (similarity > diagonal).sum(dim=1).cpu().numpy() + 1
+    optimistic = (similarity > diagonal).sum(dim=1).cpu().numpy() + 1
+    # >= counts the matching generation itself, which supplies the +1, and every
+    # tied competitor on top of it.
+    pessimistic = (similarity >= diagonal).sum(dim=1).cpu().numpy()
+    return optimistic, pessimistic
 
 
 def bootstrap_ci(values: np.ndarray, statistic=np.mean, n_boot: int = 10_000,
@@ -116,7 +153,12 @@ def main() -> None:
                              "is a harder and more meaningful test.")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_steps", type=int, default=50)
-    parser.add_argument("--cfg_scale", type=float, default=3.0)
+    parser.add_argument("--cfg_scale", type=float, default=1.0,
+                        help="1.0 = no guidance, and the default for every probe. "
+                             "CFG extrapolates the conditioning signal, which "
+                             "raises fidelity and suppresses diversity — the two "
+                             "quantities E1 and E2 measure. Vary it only as an "
+                             "explicit sensitivity analysis.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n_boot", type=int, default=10_000)
     parser.add_argument("--skip_fid", action="store_true",
@@ -174,7 +216,7 @@ def main() -> None:
         for (class_name, path), gen_pil, real_img in zip(batch, gen_pils, images):
             stem = f"{class_name}_{path.stem}"
             gen_pil.save(gen_dir / f"{stem}.png")
-            real_img.resize(gen_pil.size).save(real_dir / f"{stem}.png")
+            to_training_view(real_img, cfg["image_size"]).save(real_dir / f"{stem}.png")
             classes.append(class_name)
             stems.append(stem)
 
@@ -184,18 +226,24 @@ def main() -> None:
     h_gen = torch.cat(h_gen_all)
 
     # ---- rank fidelity ------------------------------------------------------
-    ranks = rank_metrics(h_cond, h_gen)
+    ranks, ranks_pessimistic = rank_metrics(h_cond, h_gen)
+    n_tied = int((ranks_pessimistic != ranks).sum())
+    if n_tied:
+        print(f"  [warn] {n_tied}/{len(ranks)} images have exact cosine ties — "
+              f"read mrr_no_ties/top1_rate_no_ties, not mrr/top1_rate")
     reciprocal = 1.0 / ranks
     self_cos = F.cosine_similarity(h_cond.float(), h_gen.float(), dim=1).numpy()
 
     save_metrics(
         run_dir, "metrics",
         [
-            {"image": s, "class": c, "rank": int(r),
+            {"image": s, "class": c, "rank": int(r), "rank_no_ties": int(rp),
              "reciprocal_rank": float(rr), "cosine_to_conditioning": float(cs)}
-            for s, c, r, rr, cs in zip(stems, classes, ranks, reciprocal, self_cos)
+            for s, c, r, rp, rr, cs in zip(stems, classes, ranks, ranks_pessimistic,
+                                           reciprocal, self_cos)
         ],
-        ["image", "class", "rank", "reciprocal_rank", "cosine_to_conditioning"],
+        ["image", "class", "rank", "rank_no_ties", "reciprocal_rank",
+         "cosine_to_conditioning"],
     )
 
     mrr, mrr_lo, mrr_hi = bootstrap_ci(reciprocal, np.mean, args.n_boot, seed=args.seed)
@@ -209,6 +257,16 @@ def main() -> None:
         "mean_rank": mean_rank, "mean_rank_ci95": [rank_lo, rank_hi],
         "median_rank": float(np.median(ranks)),
         "top1_rate": top1,
+        # Tie-pessimistic duplicates: identical to the above unless n_tied_images
+        # > 0, in which case the headline numbers were flattered by tie-breaking.
+        "n_tied_images": n_tied,
+        "mrr_no_ties": float((1.0 / ranks_pessimistic).mean()),
+        "top1_rate_no_ties": float((ranks_pessimistic == 1).mean()),
+        # Chance levels for this N, so the numbers above can be read without
+        # recomputing them: a random ordering gives mean rank (N+1)/2.
+        "chance_mean_rank": (len(ranks) + 1) / 2,
+        "chance_mrr": float(np.mean(1.0 / np.arange(1, len(ranks) + 1))),
+        "chance_top1_rate": 1.0 / len(ranks),
         "mean_cosine_to_conditioning": float(self_cos.mean()),
         "cfg_scale": args.cfg_scale, "num_steps": args.num_steps, "seed": args.seed,
     }

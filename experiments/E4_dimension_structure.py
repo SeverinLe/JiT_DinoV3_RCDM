@@ -116,7 +116,10 @@ def main() -> None:
     parser.add_argument("--n_samples", type=int, default=3,
                         help="Generations per condition")
     parser.add_argument("--num_steps", type=int, default=50)
-    parser.add_argument("--cfg_scale", type=float, default=3.0)
+    parser.add_argument("--cfg_scale", type=float, default=1.0,
+                        help="1.0 = no guidance, and the default for every probe. "
+                             "CFG would amplify the effect of an edited h and "
+                             "overstate how much each dimension controls.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
     parser.add_argument("--tag", default=None)

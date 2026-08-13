@@ -14,16 +14,43 @@ carry an error bar:
   per_pixel_std     mean over pixels of the std across the k samples
   ssim_between      mean pairwise SSIM among the k samples (high = consistent)
   ssim_to_real      mean SSIM of each sample against the conditioning image
-  lpips_between     optional perceptual distance, if lpips is installed
+  lpips_between     mean pairwise perceptual distance, if lpips is installed
 
 Reading the two SSIMs together separates the two failure modes: low
 ssim_between means the representation underdetermines the image; high
 ssim_between with low ssim_to_real means h pins down *an* image consistently,
 just not the right one.
 
+**The between-h baseline.**  None of the numbers above is interpretable on its
+own.  "per-pixel std 0.08" is only meaningful against the std you would get with
+no conditioning constraint at all, and on a domain this homogeneous — every
+image a centre-cropped fundus photo with similar colour statistics — that floor
+is high.  E1 made the same point in representation space: a generated image sits
+at cosine 0.946 from its own h, but two *unrelated* retinas already sit at
+0.921, so the raw number said almost nothing.
+
+So every metric is also computed *between* conditioning vectors: one sample from
+each of the N distinct h, compared the same way.  That gives
+
+    ratio_within_over_between = within-h variability / between-h variability
+
+which is the quantity to report.  Near 0 means h determines the image; near 1
+means h constrains nothing the unconditional model would not have produced
+anyway.  For SSIM the analogous normalisation is the fraction of the available
+structural headroom that h explains,
+
+    (ssim_within - ssim_between) / (1 - ssim_between)
+
+The between-h per-pixel std is estimated from random subsets of the *same* size
+k as the within-h estimate, so the two come from an identical estimator and the
+ratio is not contaminated by sample-size bias.
+
 Figures per conditioning image:
   samples_<stem>.png       [real | sample_1 ... sample_k]
   variability_<stem>.png   mean sample, per-pixel std map, |mean - real|
+
+For a cross-class variance heatmap with a shared colour scale, see the companion
+script E2_variance_heatmap.py.
 
 Usage:
     python experiments/E2_sample_variability.py \
@@ -36,7 +63,6 @@ Usage:
 import argparse
 import json
 from itertools import combinations
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -59,10 +85,30 @@ from common import (
 
 EXPERIMENT = "E2_sample_variability"
 
+# 8-bit quantisation step.  If the k samples differ by less than this they are
+# byte-identical once saved, and no variability statistic computed from them
+# means anything.
+QUANTISATION_FLOOR = 1.0 / 255.0
 
-def pairwise_ssim(images: np.ndarray) -> float:
+
+def select_pairs(n: int, max_pairs: int | None = None, rng=None) -> list:
     """
-    Mean SSIM over all unordered pairs of a (k, H, W, 3) stack in [0, 1].
+    Unordered index pairs of a stack of n images, optionally subsampled.
+
+    The between-h baseline compares ~30 images (435 pairs) and LPIPS is a
+    network forward pass per pair, so capping the count keeps the baseline cheap
+    without biasing the mean — pairs are exchangeable.
+    """
+    pairs = list(combinations(range(n), 2))
+    if max_pairs and len(pairs) > max_pairs:
+        rng = rng or np.random.default_rng(0)
+        pairs = [pairs[i] for i in rng.choice(len(pairs), size=max_pairs, replace=False)]
+    return pairs
+
+
+def pairwise_ssim(images: np.ndarray, max_pairs: int | None = None, rng=None) -> float:
+    """
+    Mean SSIM over unordered pairs of a (k, H, W, 3) stack in [0, 1].
 
     Returns NaN if scikit-image is unavailable, so the rest of the metrics
     still get written.
@@ -73,9 +119,60 @@ def pairwise_ssim(images: np.ndarray) -> float:
         return float("nan")
     scores = [
         structural_similarity(images[i], images[j], channel_axis=2, data_range=1.0)
-        for i, j in combinations(range(len(images)), 2)
+        for i, j in select_pairs(len(images), max_pairs, rng)
     ]
     return float(np.mean(scores)) if scores else float("nan")
+
+
+_LPIPS_CACHE: dict = {}
+
+
+def _lpips_model(device: torch.device):
+    """Load AlexNet-LPIPS once per process; None if the package is absent."""
+    if "net" not in _LPIPS_CACHE:
+        try:
+            import lpips as lpips_lib
+
+            _LPIPS_CACHE["net"] = lpips_lib.LPIPS(net="alex", verbose=False).to(device).eval()
+            print("  [lpips] AlexNet backbone loaded")
+        except ImportError:
+            print("  [lpips] not installed — lpips columns will be NaN "
+                  "(pip install lpips)")
+            _LPIPS_CACHE["net"] = None
+    return _LPIPS_CACHE["net"]
+
+
+def pairwise_lpips(images: torch.Tensor, device: torch.device,
+                   max_pairs: int | None = None, rng=None,
+                   chunk: int = 16) -> float:
+    """
+    Mean pairwise LPIPS over a (k, 3, H, W) stack in [0, 1].
+
+    SSIM is a local-statistics measure and saturates on images that differ in
+    texture but not in layout; LPIPS compares deep features and is the better
+    discriminator of "the vessels moved" versus "the noise changed".  It is
+    optional because it pulls in an extra checkpoint download.
+
+    Higher = more different, i.e. the opposite direction to SSIM.
+    """
+    net = _lpips_model(device)
+    if net is None:
+        return float("nan")
+
+    pairs = select_pairs(len(images), max_pairs, rng)
+    if not pairs:
+        return float("nan")
+
+    left = torch.stack([images[i] for i, _ in pairs])
+    right = torch.stack([images[j] for _, j in pairs])
+    scores = []
+    with torch.no_grad():
+        for start in range(0, len(pairs), chunk):
+            # LPIPS expects [-1, 1], the same convention as the diffusion space.
+            a = left[start: start + chunk].to(device) * 2.0 - 1.0
+            b = right[start: start + chunk].to(device) * 2.0 - 1.0
+            scores.append(net(a, b).flatten().cpu())
+    return float(torch.cat(scores).mean())
 
 
 def ssim_against(reference: np.ndarray, images: np.ndarray) -> float:
@@ -95,6 +192,89 @@ def to_numpy_stack(x: torch.Tensor) -> np.ndarray:
     return x.permute(0, 2, 3, 1).cpu().numpy()
 
 
+def between_h_baseline(one_per_h: torch.Tensor, k: int, device: torch.device,
+                       n_draws: int = 20, max_pairs: int = 200,
+                       seed: int = 0) -> dict:
+    """
+    The same three metrics computed *across* conditioning vectors.
+
+    Takes one sample from each of the N distinct h and measures how different
+    those are from each other.  This is the no-conditioning-constraint floor:
+    whatever variability survives here is what the generator produces anyway,
+    independent of which h it was given.
+
+    The std is averaged over ``n_draws`` random subsets of size k rather than
+    computed once over all N, so it comes from the identical estimator as the
+    within-h number and the ratio of the two is unbiased by sample size.
+
+    Args:
+        one_per_h: (N, 3, H, W) in [0, 1], one generation per conditioning image.
+        k: the within-h sample count, matched here.
+        n_draws: random size-k subsets averaged for the std estimate.
+        max_pairs: cap on SSIM/LPIPS pair count.
+
+    Returns:
+        dict with per_pixel_std, ssim, lpips and the settings used.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(one_per_h)
+    k = min(k, n)
+
+    stds = []
+    for _ in range(n_draws):
+        subset = one_per_h[rng.choice(n, size=k, replace=False)]
+        # Identical reduction to the within-h path: std over samples, then mean
+        # over channels, then mean over pixels.
+        stds.append(float(subset.std(dim=0).mean(dim=0).mean()))
+
+    return {
+        "per_pixel_std": float(np.mean(stds)),
+        "per_pixel_std_sd_over_draws": float(np.std(stds, ddof=1)) if len(stds) > 1 else 0.0,
+        "ssim": pairwise_ssim(to_numpy_stack(one_per_h), max_pairs, rng),
+        "lpips": pairwise_lpips(one_per_h, device, max_pairs, rng),
+        "n_images": n, "k": k, "n_draws": n_draws, "max_pairs": max_pairs,
+    }
+
+
+def nan_mean(values) -> float:
+    """np.nanmean that returns NaN for an all-NaN column instead of warning.
+
+    Reached whenever an optional metric is unavailable — lpips absent makes the
+    whole column NaN, and that should not produce console noise.
+    """
+    finite = [v for v in np.asarray(values, dtype=float) if np.isfinite(v)]
+    return float(np.mean(finite)) if finite else float("nan")
+
+
+def nan_std(values) -> float:
+    """Sample std over the finite entries; 0.0 for a single value, NaN if none."""
+    finite = [v for v in np.asarray(values, dtype=float) if np.isfinite(v)]
+    if not finite:
+        return float("nan")
+    return float(np.std(finite, ddof=1)) if len(finite) > 1 else 0.0
+
+
+def safe_ratio(within: float, between: float) -> float:
+    """within/between, NaN-safe — the reportable form of a variability metric."""
+    if not np.isfinite(within) or not np.isfinite(between) or between == 0:
+        return float("nan")
+    return float(within / between)
+
+
+def headroom_fraction(within: float, between: float) -> float:
+    """
+    Fraction of the available structural headroom that h explains.
+
+    SSIM has a hard ceiling at 1, so the interesting quantity is not
+    ssim_within - ssim_between but how much of the distance from the
+    between-h floor to that ceiling the conditioning actually closes.
+    1.0 = h fully determines the image, 0.0 = no better than an unrelated h.
+    """
+    if not np.isfinite(within) or not np.isfinite(between) or between >= 1.0:
+        return float("nan")
+    return float((within - between) / (1.0 - between))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="E2 — what h encodes vs. discards")
     parser.add_argument("--checkpoint", required=True)
@@ -107,7 +287,15 @@ def main() -> None:
                         help="Generations per conditioning image (k). The "
                              "variability estimate is noisy below ~8.")
     parser.add_argument("--num_steps", type=int, default=50)
-    parser.add_argument("--cfg_scale", type=float, default=3.0)
+    parser.add_argument("--cfg_scale", type=float, default=1.0,
+                        help="1.0 = no guidance, and the default for every probe. "
+                             "CFG > 1 suppresses sample diversity, which is "
+                             "exactly what this experiment measures.")
+    parser.add_argument("--n_baseline_draws", type=int, default=20,
+                        help="Random size-k subsets averaged for the between-h "
+                             "std estimate.")
+    parser.add_argument("--max_baseline_pairs", type=int, default=200,
+                        help="Cap on SSIM/LPIPS pairs in the between-h baseline.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
     parser.add_argument("--tag", default=None)
@@ -121,8 +309,11 @@ def main() -> None:
     encoder, enc_transform = load_probe_encoder(args.encoder, device, cfg, args.encoder_ckpt)
     image_size = cfg["image_size"]
 
+    # Bicubic to match data/scripts/pack_dataset.py, which produced the tensor
+    # the generator was trained on.  ssim_to_real compares against this, so a
+    # different resampling filter would show up as a fixed SSIM penalty.
     display_transform = transforms.Compose([
-        transforms.Resize(image_size),
+        transforms.Resize(image_size, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(image_size),
         transforms.ToTensor(),
     ])
@@ -139,6 +330,7 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     rows = []
+    one_per_h = []          # first sample of each h — the between-h baseline stack
     for class_name, path in pairs:
         img = Image.open(path).convert("RGB")
 
@@ -162,8 +354,10 @@ def main() -> None:
             "per_pixel_std_max": float(std_map.max()),
             "ssim_between": pairwise_ssim(stack),
             "ssim_to_real": ssim_against(real_np, stack),
+            "lpips_between": pairwise_lpips(samples.cpu(), device),
         }
         rows.append(metrics)
+        one_per_h.append(samples[0].cpu())
 
         # Figure 1: the grid itself.
         vutils.save_image(
@@ -198,29 +392,80 @@ def main() -> None:
 
     save_metrics(run_dir, "metrics", rows,
                  ["image", "class", "per_pixel_std", "per_pixel_std_max",
-                  "ssim_between", "ssim_to_real"])
+                  "ssim_between", "ssim_to_real", "lpips_between"])
 
     # Aggregate per class — advanced grades have few training images, so a
     # per-class breakdown is where the data-scarcity effect shows up.
+    metric_keys = ("per_pixel_std", "ssim_between", "ssim_to_real", "lpips_between")
     summary = {}
-    for key in ("per_pixel_std", "ssim_between", "ssim_to_real"):
+    for key in metric_keys:
         values = np.array([r[key] for r in rows], dtype=float)
         summary[key] = {
-            "mean": float(np.nanmean(values)),
-            "std": float(np.nanstd(values, ddof=1)) if len(values) > 1 else 0.0,
-            "n": int(np.count_nonzero(~np.isnan(values))),
+            "mean": nan_mean(values),
+            "std": nan_std(values),
+            "n": int(np.count_nonzero(np.isfinite(values))),
         }
     summary["per_class"] = {
         class_name: {
-            key: float(np.nanmean([r[key] for r in rows if r["class"] == class_name]))
-            for key in ("per_pixel_std", "ssim_between", "ssim_to_real")
+            key: nan_mean([r[key] for r in rows if r["class"] == class_name])
+            for key in metric_keys
         }
         for class_name in sorted({r["class"] for r in rows})
     }
+
+    # ---- between-h baseline: the floor every number above must be read against
+    print(f"\n  [baseline] variability across {len(one_per_h)} different h ...")
+    baseline = between_h_baseline(torch.stack(one_per_h), args.n_samples, device,
+                                  n_draws=args.n_baseline_draws,
+                                  max_pairs=args.max_baseline_pairs, seed=args.seed)
+    summary["baseline_between_h"] = baseline
+
+    within_std = summary["per_pixel_std"]["mean"]
+    within_ssim = summary["ssim_between"]["mean"]
+    within_lpips = summary["lpips_between"]["mean"]
+    summary["normalised"] = {
+        # 0 = h fully determines the image, 1 = h constrains nothing.
+        "std_ratio_within_over_between": safe_ratio(within_std, baseline["per_pixel_std"]),
+        "lpips_ratio_within_over_between": safe_ratio(within_lpips, baseline["lpips"]),
+        # 1 = h fully determines the image, 0 = no better than an unrelated h.
+        "ssim_headroom_explained": headroom_fraction(within_ssim, baseline["ssim"]),
+    }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
-    print(f"\n  mean per-pixel std {summary['per_pixel_std']['mean']:.4f} "
-          f"± {summary['per_pixel_std']['std']:.4f}")
+    # ---- collapse guard -----------------------------------------------------
+    # A generator that ignores its noise maps each h to exactly one image.  Then
+    # every ratio above goes to 0 and ssim_headroom_explained to 1, which reads
+    # as "h determines the retina perfectly" — the precise opposite of what has
+    # happened.  The premise of RQ2 (sample k images, see what varies) requires
+    # a sampler that actually varies, so this is checked, not assumed.
+    collapsed = bool(np.isfinite(within_std) and within_std < QUANTISATION_FLOOR)
+    summary["sampler_collapsed"] = collapsed
+    summary["quantisation_floor"] = QUANTISATION_FLOOR
+    if collapsed:
+        summary["normalised"] = {k: float("nan") for k in summary["normalised"]}
+        print(f"\n  {'=' * 68}")
+        print(f"  SAMPLER COLLAPSE: within-h std {within_std:.6f} is below the "
+              f"8-bit\n  quantisation floor {QUANTISATION_FLOOR:.4f} — the k samples "
+              "are byte-identical.")
+        print("  This generator is a deterministic function of h, so it cannot "
+              "report\n  what h discards.  The normalised ratios are voided "
+              "rather than written,\n  because near-zero would otherwise read as "
+              "'h determines everything'.")
+        print(f"  {'=' * 68}")
+        (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+
+    norm = summary["normalised"]
+    print(f"\n  per-pixel std   within-h {within_std:.4f}  "
+          f"between-h {baseline['per_pixel_std']:.4f}  "
+          f"ratio {norm['std_ratio_within_over_between']:.3f}")
+    print(f"  ssim            within-h {within_ssim:.4f}  "
+          f"between-h {baseline['ssim']:.4f}  "
+          f"headroom explained {norm['ssim_headroom_explained']:.3f}")
+    print(f"  lpips           within-h {within_lpips:.4f}  "
+          f"between-h {baseline['lpips']:.4f}  "
+          f"ratio {norm['lpips_ratio_within_over_between']:.3f}")
+    print("\n  ratio -> 0 means h determines the image; -> 1 means h constrains "
+          "nothing.\n  Read these, not the raw numbers.")
     print(f"Done — {run_dir}")
 
 

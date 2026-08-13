@@ -155,7 +155,11 @@ def main() -> None:
                         help="Generations per variant in the qualitative grids")
     parser.add_argument("--crop_size", type=int, default=128)
     parser.add_argument("--num_steps", type=int, default=50)
-    parser.add_argument("--cfg_scale", type=float, default=3.0)
+    parser.add_argument("--cfg_scale", type=float, default=1.0,
+                        help="1.0 = no guidance, and the default for every probe. "
+                             "Only the visual panels use the generator here, but "
+                             "they must come from the same sampler setting as the "
+                             "rest of the study.")
     parser.add_argument("--skip_generation", action="store_true",
                         help="Measure the encoder only; no generator needed")
     parser.add_argument("--seed", type=int, default=0)

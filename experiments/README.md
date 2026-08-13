@@ -20,7 +20,8 @@ in git; figures selected for the write-up are copied into `report/figures/`.
 | Script | RQ | Question | Primary output |
 |---|---|---|---|
 | `E1_fidelity.py` | RQ1 | Is `h` invertible — can the generator reconstruct the scan it came from? | MRR + mean rank with bootstrap CI, FID |
-| `E2_sample_variability.py` | RQ2 | What does `h` encode vs. discard? | per-pixel std, pairwise SSIM, variability maps |
+| `E2_sample_variability.py` | RQ2 | What does `h` encode vs. discard? | within-h vs between-h std/SSIM/LPIPS ratios |
+| `E2_variance_heatmap.py` | RQ2 | *Where* in the retina does `h` leave things free? | shared-scale variance heatmaps over the fundus |
 | `E3_invariance.py` | RQ3 | Which transformations is `h` invariant to? | cosine similarity per transform ± CI, Wilcoxon + Holm |
 | `E4_dimension_structure.py` | RQ4 | Do individual dimensions carry separable factors? | masking/substitution grids, `dimensions.json` |
 | `E5_downstream_probe.py` | RQ5 | Do the generative findings predict classifier behaviour? | balanced accuracy ± 95% CI, McNemar |
@@ -66,6 +67,15 @@ carries no error bar.
 ## Conventions
 
 - `--seed` on every script; recorded in `run_config.json`.
+- `--cfg_scale 1.0` on every probe (E1–E4).  Classifier-free guidance
+  extrapolates the conditioning signal, which raises fidelity and suppresses
+  diversity — precisely the quantities E1 and E2 measure — so a tuned CFG value
+  would let the sampler decide the result.  At 1.0 the sampler skips the
+  `null_h` branch entirely and the generation is a pure function of `h`, which
+  is also what makes the MRR comparable to Bordes et al.  `sample_grid.py` keeps
+  3.0 because its output is qualitative figures where legibility is the point;
+  the value belongs in the caption.  Varying it elsewhere is a sensitivity
+  analysis and must be reported as one.
 - `--tag` names a run directory; omitted, it defaults to a UTC timestamp.
 - `--device cpu|cuda|mps`, falling back to CPU with a warning if unavailable.
 - `--encoder` is checked against the checkpoint's `h_dim`; a mismatch raises
